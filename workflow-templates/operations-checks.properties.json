@@ -1,0 +1,14 @@
+{
+  "name": "jaeview-web Remote Operations Checks (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] operations runtime & MCP checks with isolated Postgres 17 container.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration",
+    "TypeScript",
+    "PostgreSQL"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

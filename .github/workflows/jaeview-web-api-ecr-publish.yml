@@ -1,0 +1,110 @@
+# scripts/deploy/dispatch.mts release oci용 OCI API 이미지 게시기 (Mac mini self-hosted runner).
+name: API ECR build and publish (Mac mini)
+run-name: 'API publish ${{ inputs.request_id }}'
+on:
+  workflow_call:
+    inputs:
+      request_id:
+        description: Optional caller correlation ID
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Optional caller correlation ID
+        type: string
+        default: ''
+permissions: {}
+concurrency:
+  group: api-ecr-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'jaeview/jaeview-web' && github.repository_id == '1384694704' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AWS_PAGER: ''
+      REGISTRY: 357878953679.dkr.ecr.ap-northeast-2.amazonaws.com
+      API_IMAGE: 357878953679.dkr.ecr.ap-northeast-2.amazonaws.com/jaeview/api:git-${{ github.sha }}-r${{ github.run_id }}-a${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # require-ci가 첫 부모를 따라가 코드 커밋을 찾는다
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Select safe Docker context on Mac mini
+        run: |
+          if docker context inspect colima-jaeview-release >/dev/null 2>&1; then
+            printf 'DOCKER_CONTEXT=colima-jaeview-release\n' >> "$GITHUB_ENV"
+          else
+            ctx=$(docker context show 2>/dev/null || echo default)
+            if [ "$ctx" = "colima-jaeview" ]; then
+              echo "::error::Refusing to run in protected Docker context colima-jaeview"
+              exit 1
+            fi
+            printf 'DOCKER_CONTEXT=%s\n' "$ctx" >> "$GITHUB_ENV"
+          fi
+      - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+      - name: Require exact source checks
+        run: |
+          node scripts/deploy/control.mjs require-ci
+          node --test scripts/deploy/control.test.mjs
+          pnpm --filter @jaeview/server install --frozen-lockfile --ignore-scripts
+          pnpm --dir server typecheck
+      - name: Build native OCI arm64 image with resolved base digest
+        shell: bash
+        run: |
+          docker pull node:26.12.1-alpine
+          base=$(docker image inspect node:26.12.1-alpine --format '{{index .RepoDigests 0}}')
+          docker build --platform linux/arm64 --provenance=false --build-arg NODE_IMAGE="$base" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" -t "$API_IMAGE" -f server/Dockerfile .
+          container="jaeview-api-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$container" --network none -e PGHOST=127.0.0.1 "$API_IMAGE"
+          ready=0
+          for attempt in $(seq 1 30); do
+            if docker exec "$container" node -e "fetch('http://127.0.0.1:8787/api/health').then(async r=>{const b=await r.json();process.exit(r.status===200&&b.ok===true?0:1)}).catch(()=>process.exit(1))"; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          # 이 격리 이미지 smoke에는 DB가 없다. readiness는 실패해야 한다. 정확한 소스 CI는 새 DB를 검사한다.
+          docker exec "$container" node -e "fetch('http://127.0.0.1:8787/api/ready').then(r=>process.exit(r.status===503?0:1)).catch(()=>process.exit(1))"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.JAEVIEW_API_ECR_ROLE_ARN }}
+          aws-region: ap-northeast-2
+          allowed-account-ids: '357878953679'
+          role-session-name: api-publish-${{ github.run_id }}
+          role-duration-seconds: 1800
+          unset-current-credentials: true
+          output-credentials: false
+      - name: Publish and scan immutable API image
+        shell: bash
+        run: |
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/api-ecr.XXXXXX")
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin "$REGISTRY"
+          docker push "$API_IMAGE"
+          node scripts/deploy/control.mjs record-api "$RUNNER_TEMP/api-release"
+      - name: Save API release and scan evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: api-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/api-release/
+          retention-days: 90
+          if-no-files-found: warn
+      - name: Clean up local smoke image tag
+        if: always()
+        run: docker rmi "$API_IMAGE" >/dev/null 2>&1 || true

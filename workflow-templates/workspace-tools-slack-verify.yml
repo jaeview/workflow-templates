@@ -1,0 +1,77 @@
+name: Workspace tools Slack verification (Mac mini self-hosted)
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: Verification mode (check = format only, verify = Slack auth.test + conversations.info without sending messages)
+        type: string
+        required: false
+        default: 'check'
+      test_channel:
+        description: Dedicated test channel ID (e.g. C123ABC)
+        type: string
+        required: false
+        default: ''
+      node_version:
+        description: Node.js version to use
+        type: string
+        required: false
+        default: '26.12.1'
+    secrets:
+      WORKSPACE_SLACK_TOKEN:
+        description: Slack Bot token (required for verify mode)
+        required: false
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Verification mode (check = format only, verify = Slack auth.test + conversations.info without sending messages)
+        type: choice
+        options: [check, verify]
+        default: 'check'
+        required: true
+      test_channel:
+        description: Dedicated test channel ID (e.g. C123ABC)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workspace-tools-slack-verify-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  slack-check:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node_version || '26.12.1' }}
+      - name: Install locked pnpm and dependencies
+        run: |
+          npm install --global pnpm@12.16.1 --ignore-scripts --no-audit --no-fund
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Run read-only Slack configuration and channel check
+        env:
+          CHECK_MODE: ${{ inputs.mode || 'check' }}
+          WORKSPACE_SLACK_TOKEN: ${{ secrets.WORKSPACE_SLACK_TOKEN }}
+          WORKSPACE_SLACK_TEST_CHANNEL: ${{ inputs.test_channel }}
+        run: |
+          case "$CHECK_MODE" in
+            check)
+              pnpm run slack:check
+              ;;
+            verify)
+              pnpm run slack:verify
+              ;;
+            *)
+              echo "::error::Only read-only modes (check, verify) are allowed in automated workflows."
+              exit 1
+              ;;
+          esac

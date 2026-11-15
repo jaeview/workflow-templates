@@ -1,0 +1,13 @@
+{
+  "name": "jaeview-web Remote Operations (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] bounded encrypted remote operations via AWS SSM.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Deployment",
+    "AWS"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

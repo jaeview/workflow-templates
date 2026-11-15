@@ -1,0 +1,90 @@
+name: Remote operations checks (Mac mini)
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      [
+        'deploy/operations/**',
+        'scripts/operations/**',
+        '.agents/skills/data-analysis/**',
+        '.agents/skills/jaeview-ops/**',
+        '.github/workflows/*operations*.yml',
+        'package.json',
+        'pnpm-lock.yaml',
+        'pnpm-workspace.yaml',
+        '.node-version',
+      ]
+  push:
+    branches: [main]
+    paths:
+      [
+        'deploy/operations/**',
+        'scripts/operations/**',
+        '.agents/skills/data-analysis/**',
+        '.agents/skills/jaeview-ops/**',
+        '.github/workflows/*operations*.yml',
+        'package.json',
+        'pnpm-lock.yaml',
+        'pnpm-workspace.yaml',
+        '.node-version',
+      ]
+permissions:
+  contents: read
+concurrency:
+  group: operations-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Select safe Docker context on Mac mini
+        run: |
+          if docker context inspect colima-jaeview-release >/dev/null 2>&1; then
+            printf 'DOCKER_CONTEXT=colima-jaeview-release\n' >> "$GITHUB_ENV"
+          else
+            ctx=$(docker context show 2>/dev/null || echo default)
+            if [ "$ctx" = "colima-jaeview" ]; then
+              echo "::error::Refusing to run in protected Docker context colima-jaeview"
+              exit 1
+            fi
+            printf 'DOCKER_CONTEXT=%s\n' "$ctx" >> "$GITHUB_ENV"
+          fi
+      - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+      - run: pnpm --filter jaeview-operations-runtime install --frozen-lockfile --ignore-scripts
+      - run: pnpm --dir deploy/operations typecheck
+      - name: Run operations tests with isolated Postgres 17 container
+        run: |
+          # macOS self-hosted runner에서는 GitHub Actions `services:` 컨테이너 대신 격리된 임시 컨테이너를 띄운다.
+          pg_container="jaeview-ops-pg-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
+          trap 'docker rm -f "$pg_container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$pg_container" \
+            -e POSTGRES_PASSWORD=ops-test-only \
+            -e POSTGRES_DB=ops_test \
+            -p 127.0.0.1::5432 \
+            --tmpfs /var/lib/postgresql/data:rw,size=128m \
+            postgres:17 >/dev/null
+          pg_port=$(docker port "$pg_container" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
+          test -n "$pg_port"
+          ready=0
+          for attempt in $(seq 1 30); do
+            if docker exec "$pg_container" pg_isready -U postgres -d ops_test >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          JAEVIEW_OPS_TEST_DB="postgres://postgres:ops-test-only@127.0.0.1:${pg_port}/ops_test" pnpm --dir deploy/operations test
+      - run: bash -n deploy/operations/run-host.sh
+      - name: Check shared analysis MCP and bounded OCI query generation (no production calls)
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --prefix .agents/skills/data-analysis/scripts
+          npm test --prefix .agents/skills/data-analysis/scripts

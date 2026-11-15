@@ -1,0 +1,14 @@
+{
+  "name": "workspace-tools CI (Mac mini Standalone)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] standalone CI workflow for @jaeview/workspace-tools (pnpm typecheck & test).",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration",
+    "TypeScript",
+    "Node.js"
+  ],
+  "filePatterns": [
+    "package.json",
+    "tsconfig.json"
+  ]
+}

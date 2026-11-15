@@ -1,0 +1,81 @@
+name: Develop apply verified release (Mac mini)
+on:
+  workflow_call:
+    inputs:
+      publish_run_id:
+        description: Publish workflow run ID
+        type: string
+        required: true
+      publish_run_attempt:
+        description: Publish workflow run attempt
+        type: string
+        required: false
+        default: '1'
+  workflow_run:
+    workflows: [Develop verified images, 'Develop verified images (Mac mini)']
+    types: [completed]
+    branches: [develop]
+permissions:
+  contents: read
+  actions: read
+  packages: read
+  id-token: write
+concurrency:
+  group: develop-apply
+  cancel-in-progress: false
+jobs:
+  apply:
+    if: >-
+      github.repository == 'jaeview/jaeview-web' &&
+      (
+        github.event_name == 'workflow_call' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.id == github.repository_id
+        )
+      )
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    steps:
+      # 체크아웃하지 않는다. 후보 코드와 산출물은 이 잡에서 실행되지 않는다.
+      - name: Notify fixed test controller using short lived credentials
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+          PUBLISH_RUN: ${{ inputs.publish_run_id || github.event.workflow_run.id }}
+          PUBLISH_ATTEMPT: ${{ inputs.publish_run_attempt || github.event.workflow_run.run_attempt }}
+        run: |
+          node --input-type=module <<'JS'
+          import { writeFileSync } from 'node:fs';
+          const audience = 'https://dev.jaeview.com/_deploy/v1';
+          const oidcResponse = await fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=' + encodeURIComponent(audience), { headers: { Authorization: 'Bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }, signal: AbortSignal.timeout(15000) });
+          if (!oidcResponse.ok) throw Error('OIDC unavailable');
+          const {value:oidc} = await oidcResponse.json();
+          let accepted;
+          for (let i=0;i<3;i++) {
+            accepted = await fetch(audience, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({oidc, token:process.env.GH_READ_TOKEN, runId:Number(process.env.PUBLISH_RUN), attempt:Number(process.env.PUBLISH_ATTEMPT)}), signal:AbortSignal.timeout(25000)});
+            if (accepted.status !== 409) break;
+            await new Promise(r=>setTimeout(r,10000));
+          }
+          if (accepted.status !== 202) throw Error('Controller refused: HTTP ' + accepted.status);
+          const {statusToken} = await accepted.json();
+          for (let i=0;i<75;i++) {
+            await new Promise(r=>setTimeout(r,10000));
+            const response = await fetch(audience+'/status', {headers:{Authorization:'Bearer '+statusToken}, signal:AbortSignal.timeout(20000)});
+            if (!response.ok) throw Error('Receipt unavailable; reconcile host journal, do not resubmit');
+            const state = await response.json();
+            if (state.state === 'running') continue;
+            writeFileSync(process.env.RUNNER_TEMP+'/dev-deployment.json',JSON.stringify(state,null,2));
+            console.log(JSON.stringify(state));
+            if (state.state !== 'complete' || !state.result?.ok) throw Error('Deployment not accepted; inspect receipt');
+            process.exit(0);
+          }
+          throw Error('Controller receipt timed out; reconcile host journal');
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: dev-deployment-${{ inputs.publish_run_id || github.event.workflow_run.id }}-${{ inputs.publish_run_attempt || github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/dev-deployment.json
+          retention-days: 1
+          if-no-files-found: warn

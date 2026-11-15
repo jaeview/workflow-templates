@@ -1,0 +1,14 @@
+name: Workspace tools CI
+on:
+  push:
+    branches: [$default-branch]
+  pull_request:
+    branches: [$default-branch]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: jaeview/workflow-templates/.github/workflows/workspace-tools-ci.yml@main

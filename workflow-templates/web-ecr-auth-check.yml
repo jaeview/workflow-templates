@@ -1,0 +1,89 @@
+name: Web ECR authentication check (Mac mini)
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: web-ecr-auth-check
+  cancel-in-progress: false
+
+jobs:
+  verify-auth:
+    if: >-
+      github.repository == 'jaeview/jaeview-web' &&
+      github.repository_id == '1384694704' &&
+      github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_PAGER: ''
+    steps:
+      - name: Validate role configuration
+        env:
+          CONFIGURED_ROLE: ${{ vars.JAEVIEW_WEB_ECR_ROLE_ARN }}
+        run: |
+          if [[ "$CONFIGURED_ROLE" != 'arn:aws:iam::357878953679:role/JaeviewWebGitHubEcrPushRole' ]]; then
+            echo '::error::Set repository variable JAEVIEW_WEB_ECR_ROLE_ARN to the approved web ECR role ARN.'
+            exit 1
+          fi
+
+      - name: Authenticate with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.JAEVIEW_WEB_ECR_ROLE_ARN }}
+          aws-region: ap-northeast-2
+          audience: sts.amazonaws.com
+          allowed-account-ids: '357878953679'
+          role-session-name: web-auth-${{ github.run_id }}
+          role-duration-seconds: 900
+          retry-max-attempts: 2
+          action-timeout-s: 90
+          unset-current-credentials: true
+          translate-env-variables: false
+          output-credentials: false
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"ecr:GetAuthorizationToken","Resource":"*"},
+              {"Effect":"Allow","Action":"ecr:DescribeImages","Resource":[
+                "arn:aws:ecr:ap-northeast-2:357878953679:repository/jaeview/web",
+                "arn:aws:ecr:ap-northeast-2:357878953679:repository/jaeview/web-proxy"
+              ]}
+            ]}
+
+      - name: Verify AWS identity and ECR read access
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          principal=$(aws sts get-caller-identity --query Arn --output text)
+          test "$account" = '357878953679'
+          case "$principal" in
+            arn:aws:sts::357878953679:assumed-role/JaeviewWebGitHubEcrPushRole/*) ;;
+            *) echo '::error::Unexpected AWS role identity'; exit 1 ;;
+          esac
+          echo 'AWS_IDENTITY_OK'
+
+          endpoint=$(aws ecr get-authorization-token \
+            --region ap-northeast-2 \
+            --query 'authorizationData[0].proxyEndpoint' --output text)
+          test "$endpoint" = 'https://357878953679.dkr.ecr.ap-northeast-2.amazonaws.com'
+          echo 'ECR_AUTH_TOKEN_OK'
+
+          for repository in jaeview/web jaeview/web-proxy; do
+            aws ecr describe-images --region ap-northeast-2 \
+              --registry-id 357878953679 --repository-name "$repository" \
+              --max-results 1 --no-paginate \
+              --query 'length(imageDetails)' --output text > /dev/null
+            echo "ECR_READ_OK $repository"
+          done
+          echo 'AUTH_CHECK_PASSED'
+          printf '%s\n' \
+            'OIDC identity, ECR token issuance, and read access to both web repositories passed.' \
+            'No build, image upload, Docker login, server access, or deployment was performed.' \
+            'Image push permission and production readiness remain unverified.' >> "$GITHUB_STEP_SUMMARY"

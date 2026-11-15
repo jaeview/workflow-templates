@@ -1,0 +1,13 @@
+{
+  "name": "workspace-tools Slack Verification (Mac mini)",
+  "description": "Read-only Slack configuration and channel verification workflow on Mac mini [self-hosted, macOS, ARM64].",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration",
+    "TypeScript"
+  ],
+  "filePatterns": [
+    "package.json",
+    "scripts/slack-check.ts"
+  ]
+}

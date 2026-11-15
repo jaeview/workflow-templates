@@ -1,0 +1,12 @@
+{
+  "name": "jaeview-web Develop Apply Verified Release (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] OIDC release apply trigger for dev.jaeview.com.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Deployment"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

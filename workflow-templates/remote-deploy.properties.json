@@ -1,0 +1,13 @@
+{
+  "name": "jaeview-web Remote AWS and OCI Deployment (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] AWS SSM deployment controller for AWS Web and OCI API.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Deployment",
+    "AWS"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

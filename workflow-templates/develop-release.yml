@@ -1,0 +1,114 @@
+name: Develop verified images (Mac mini)
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: develop-release
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'jaeview/jaeview-web' && (github.event_name != 'push' || github.ref == 'refs/heads/develop')
+    uses: ./.github/workflows/selfhost-migration-checks.yml
+  publish:
+    needs: verify
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      JAEVIEW_DOCKER_CONTEXT: default
+      TEST_DB_IMAGE: jaeview-dev-db-ci
+      TEST_API_IMAGE: ghcr.io/jaeview/jaeview-dev-api:${{ github.sha }}-${{ github.run_attempt }}
+      TEST_WEB_IMAGE: ghcr.io/jaeview/jaeview-dev-web:${{ github.sha }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Configure Mac mini Docker context and temp paths
+        run: |
+          rm -rf web/.generated web/.next
+          if [ "$(uname -s)" = "Darwin" ]; then
+            ci_tmp="$HOME/.cache/jaeview-ci-tmp/${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-dev"
+            mkdir -p "$ci_tmp"
+            chmod 700 "$ci_tmp"
+            printf 'TMPDIR=%s\nORIGIN_CHECK_TMP_ROOT=%s\n' "$ci_tmp" "$ci_tmp" >> "$GITHUB_ENV"
+            if docker context inspect colima-jaeview-release >/dev/null 2>&1; then
+              printf 'JAEVIEW_DOCKER_CONTEXT=colima-jaeview-release\nDOCKER_CONTEXT=colima-jaeview-release\n' >> "$GITHUB_ENV"
+            else
+              ctx=$(docker context show 2>/dev/null || echo default)
+              if [ "$ctx" = "colima-jaeview" ]; then
+                echo "::error::Refusing to run in protected Docker context colima-jaeview"
+                exit 1
+              fi
+              printf 'JAEVIEW_DOCKER_CONTEXT=%s\nDOCKER_CONTEXT=%s\n' "$ctx" "$ctx" >> "$GITHUB_ENV"
+            fi
+          fi
+      - name: Restore verified public publication for context preparation
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -e web/.generated ]; then
+            printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            trap 'docker logout ghcr.io' EXIT
+            node scripts/ci/prepare-publication.mjs
+          fi
+      - name: Final test context after public environment replacement
+        id: context
+        run: node deploy/test/shared-oci/auto/release.mjs context
+      - name: Build exact ARM64 images natively on Apple Silicon
+        env:
+          WEB_CONTEXT: ${{ steps.context.outputs.context }}
+          BUILD_ID: ${{ steps.context.outputs.build }}
+        run: |
+          docker build --platform linux/arm64 --label org.opencontainers.image.source=https://github.com/jaeview/jaeview-web --build-arg WEB_BUILD_ID="$BUILD_ID" --build-arg SOURCE_REVISION="$GITHUB_SHA" -f "$WEB_CONTEXT/deploy/next-web/Dockerfile" -t "$TEST_WEB_IMAGE" "$WEB_CONTEXT"
+          docker build --platform linux/arm64 --label org.opencontainers.image.revision="$GITHUB_SHA" --label org.opencontainers.image.source=https://github.com/jaeview/jaeview-web -f server/Dockerfile -t "$TEST_API_IMAGE" .
+          docker build --platform linux/arm64 -f deploy/postgis/Dockerfile -t jaeview-dev-postgis-ci .
+          docker build --platform linux/arm64 --build-arg POSTGIS_IMAGE=jaeview-dev-postgis-ci -f deploy/test/shared-oci/db.Dockerfile -t "$TEST_DB_IMAGE" .
+      - name: Exact image database isolation, stack and entrance regression
+        env:
+          TEST_WEB_BUILD_ID: ${{ steps.context.outputs.build }}
+          TEST_GATE_IMAGE: ${{ env.TEST_API_IMAGE }}
+        run: |
+          node deploy/test/shared-oci/stack-smoke.mjs
+          node deploy/test/shared-oci/live-read-smoke.mjs
+          node deploy/test/shared-oci/access-smoke.mjs
+          py_bin="python3"
+          if ! "$py_bin" -c 'import cryptography' >/dev/null 2>&1; then
+            if [ "$(uname -s)" = "Darwin" ]; then
+              venv_dir="$RUNNER_TEMP/py-cryptography-venv"
+              python3 -m venv "$venv_dir"
+              "$venv_dir/bin/pip" install --quiet --disable-pip-version-check cryptography
+              py_bin="$venv_dir/bin/python3"
+            else
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends python3-cryptography
+            fi
+          fi
+          "$py_bin" -m unittest discover -s deploy/test/shared-oci/auto -p 'test_*.py'
+      - name: Publish private containers only after verification
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          node deploy/test/shared-oci/auto/release.mjs registry-preflight
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          docker push "$TEST_WEB_IMAGE"
+          docker push "$TEST_API_IMAGE"
+          node deploy/test/shared-oci/auto/release.mjs manifest
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dev-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jaeview-release/
+          retention-days: 1
+          if-no-files-found: error

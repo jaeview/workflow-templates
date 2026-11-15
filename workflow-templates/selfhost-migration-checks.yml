@@ -1,0 +1,317 @@
+name: Self-hosted migration checks (Mac mini)
+on:
+  # 문서·후보 기록만 바뀐 커밋은 돌리지 않는다.
+  # 일반 브랜치 push·PR 은 가벼운 검사, 전체 검사는 develop 발행·main push·수동 실행·full-check 라벨 PR 에서만
+  # 범위는 scripts/ci/scope.mjs 가 고른다.
+  push:
+    branches: [main, refactor/directory-structure]
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches: [main, refactor/directory-structure]
+    paths-ignore: ['docs/**', '**/*.md']
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run SQL, deployment rehearsal and production containers
+        type: boolean
+        default: true
+        required: true
+  workflow_call:
+    inputs:
+      full:
+        description: Run SQL, deployment rehearsal and production containers
+        type: boolean
+        required: false
+        default: true
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: selfhost-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.repository == 'jaeview/jaeview-web'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 40
+    env:
+      JAEVIEW_DOCKER_CONTEXT: default
+      JAEVIEW_SCHEMA_API_PLATFORM: linux/arm64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Select validation scope
+        id: scope
+        run: node scripts/ci/scope.mjs
+      - name: Check CI scope policy
+        run: node --test scripts/ci/scope.test.mjs
+      - name: Exact integration candidate inputs
+        run: node scripts/migration/check-integration-candidate.mjs
+      - name: Configure Mac mini self-hosted runner workspace and Docker context
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          rm -rf web/.generated web/.next
+          if [ "$(uname -s)" = "Darwin" ]; then
+            ci_tmp="$HOME/.cache/jaeview-ci-tmp/${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+            mkdir -p "$ci_tmp"
+            chmod 700 "$ci_tmp"
+            printf 'TMPDIR=%s\nORIGIN_CHECK_TMP_ROOT=%s\n' "$ci_tmp" "$ci_tmp" >> "$GITHUB_ENV"
+            if docker context inspect colima-jaeview-release >/dev/null 2>&1; then
+              printf 'JAEVIEW_DOCKER_CONTEXT=colima-jaeview-release\nDOCKER_CONTEXT=colima-jaeview-release\n' >> "$GITHUB_ENV"
+            else
+              current_ctx=$(docker context show 2>/dev/null || echo default)
+              if [ "$current_ctx" = "colima-jaeview" ]; then
+                echo "::error::Refusing to run CI in protected Docker context colima-jaeview"
+                exit 1
+              fi
+              printf 'JAEVIEW_DOCKER_CONTEXT=%s\nDOCKER_CONTEXT=%s\n' "$current_ctx" "$current_ctx" >> "$GITHUB_ENV"
+            fi
+          fi
+      - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+        if: steps.scope.outputs.code == 'true'
+      - name: Install locked dependencies
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          pnpm install --frozen-lockfile
+      - name: Install locked data-analysis MCP dependencies
+        if: steps.scope.outputs.code == 'true'
+        run: npm --prefix .agents/skills/data-analysis/scripts ci --ignore-scripts --no-audit --no-fund
+      - name: Install pinned Chromium and browser test environment
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          if [ "$(uname -s)" = "Darwin" ]; then
+            pnpm exec playwright install chromium
+          else
+            pnpm exec playwright install --with-deps chromium
+          fi
+          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
+          import { fileURLToPath } from 'node:url';
+          import { chromium } from 'playwright';
+          console.log(`PLAYWRIGHT_MODULE=${fileURLToPath(import.meta.resolve('playwright'))}`);
+          console.log(`CHROME_PATH=${chromium.executablePath()}`);
+          NODE
+      - name: Check changed code and formatting
+        if: steps.scope.outputs.code == 'true'
+        env:
+          CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$CHANGE_BASE"
+          if [[ ! "$base" =~ ^[a-f0-9]{40}$ || "$base" =~ ^0+$ ]]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          export QUALITY_BASE_SHA="$base"
+          pnpm run test:quality
+          node --test scripts/checks/next-only-policy.test.mjs
+          pnpm run lint:changed
+          pnpm run format:check
+      - name: Restore verified public publication for CI only
+        if: steps.scope.outputs.code == 'true'
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --test scripts/ci/prepare-publication.test.mjs
+          if [ "${GITHUB_ACTIONS:-}" = true ]; then
+            printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            trap 'docker logout ghcr.io' EXIT
+            node scripts/ci/prepare-publication.mjs
+          fi
+      - name: Check stage corrections and Next production runtime
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          node scripts/checks/check-zone-safety.mjs
+          node scripts/run-test.mjs web/tests/zones/test-stage-date-cache.mts
+          pnpm run build
+          pnpm run typecheck:next
+          set -m
+          pnpm run start > /tmp/jaeview-next.log 2>&1 &
+          next_pid=$!
+          set +m
+          trap 'kill -- -"$next_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18082/healthz > /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          node scripts/next-web/smoke.mjs
+          NEXT_SMOKE_PORT=18082 node scripts/run-test.mjs web/tests/browser/test-static-public-pages.mjs
+          node scripts/run-test.mjs web/tests/browser/test-simulator-insights-browser.mjs
+          node scripts/run-test.mjs web/tests/browser/test-trade-analytics-browser.mjs
+      - name: Check web, API and operations types
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          pnpm run typecheck:all
+          pnpm --filter @jaeview/api test
+          node --import tsx server/tests/db-pool.ts
+          node --import tsx server/tests/pg-numbers.ts
+          node scripts/checks/check-domain-boundaries.mjs
+          node --import tsx server/tests/domain-api.ts
+          node --import tsx server/tests/info-hub-snapshot.ts
+          node --import tsx server/tests/community-snapshot.ts
+          node --import tsx server/tests/community-events.ts
+          node --import tsx server/tests/notion-post-intro.ts
+          node --import tsx server/tests/zone-document-publication.ts
+          node --import tsx server/tests/home-rankings-swr.ts
+          node --import tsx server/tests/zone-trade-counts.ts
+          node scripts/run-test.mjs server/tests/zone-market-summary.ts
+          node scripts/run-test.mjs server/tests/supply-plan-resolve.ts
+          node scripts/run-test.mjs server/tests/zone-value-pool.ts
+          node scripts/run-test.mjs server/tests/zone-stage-checklist.ts
+          node scripts/run-test.mjs server/tests/zone-market-price.ts
+          node --import tsx server/tests/domain-building-facts.ts
+          node scripts/run-test.mjs server/tests/zone-news-matches.ts
+          node scripts/run-test.mjs server/tests/zone-stage-presentation.ts
+          node scripts/run-test.mjs server/tests/zone-stage-pace.ts
+          node scripts/run-test.mjs server/tests/redev-stats.ts
+          node scripts/run-test.mjs server/tests/knowledge-intuitive.ts
+          TZ=UTC node scripts/run-test.mjs server/tests/zone-key-facts.ts
+          TZ=UTC node --import tsx --test server/tests/homeMoves.test.ts
+          node scripts/run-test.mjs server/tests/zone-document-release.ts
+          node scripts/run-test.mjs server/tests/zone-document-publication-cli.ts
+          node scripts/run-test.mjs server/tests/zone-document-source.ts
+          node scripts/run-test.mjs server/tests/zone-published-sections.ts
+          node scripts/run-test.mjs server/tests/zone-sections.ts
+          node scripts/run-test.mjs server/tests/zone-auto-slugs.ts
+          node scripts/run-test.mjs server/tests/zone-wiki-document.ts
+          node scripts/run-test.mjs server/tests/land-use-mix-far.ts
+          node scripts/run-test.mjs server/tests/zone-gosi-files.ts
+          node scripts/run-test.mjs server/tests/zone-gosi-model.ts
+          node scripts/run-test.mjs server/tests/zone-name-region-scope.ts
+          node scripts/run-test.mjs server/tests/investment-calculation.ts
+          node scripts/run-test.mjs server/tests/investment-api.ts
+          node scripts/run-test.mjs server/tests/investment-acquisition.ts
+          node scripts/run-test.mjs server/tests/acquisition-tax.ts
+          node scripts/run-test.mjs server/tests/investment-precision.ts
+          node scripts/run-test.mjs server/tests/simulator-insights.ts
+          node scripts/run-test.mjs server/tests/simulator-market-context.ts
+          node scripts/run-test.mjs server/tests/trade-analytics-api.ts
+          node scripts/run-test.mjs server/tests/self-test-calculation.ts
+          pnpm --dir server exec tsc -p poc/agentcore/tsconfig.json
+          node --import tsx --test server/poc/agentcore/test.ts
+      - name: Fresh SQL, narrow permissions, API and OAuth recovery
+        if: steps.scope.outputs.full == 'true'
+        run: |
+          node --test server/tests/init-independent-db.test.mjs
+          bash server/tests/fresh-schema.sh
+      - name: Reclaim completed host build and unused image caches
+        if: steps.scope.outputs.full == 'true'
+        run: |
+          if [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
+            df -h .
+            du -sh web/.next
+            rm -rf web/.next
+            docker builder prune --all --force
+            docker image prune --all --force
+            df -h .
+          fi
+      - name: Full local Next, proxy, API and database deployment rehearsal
+        if: steps.scope.outputs.full == 'true'
+        run: |
+          cat > /tmp/jaeview-compose <<'SH'
+          #!/bin/sh
+          exec docker compose "$@"
+          SH
+          chmod +x /tmp/jaeview-compose
+          JAEVIEW_COMPOSE_BIN=/tmp/jaeview-compose JAEVIEW_STACK_BUILD_ID=ci-${{ github.sha }} JAEVIEW_STACK_REVISION=${{ github.sha }} node server/scripts/test-selfhost-stack.mjs --run
+      - name: Check independent runtime and client behavior
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          node --test scripts/deploy/control.test.mjs
+          node --test deploy/remote/*.test.mts scripts/deploy/*.test.mts
+          pnpm run typecheck:deploy
+          pnpm run test:independence
+          node tests/platform/test-independence-policy.mjs
+          node scripts/migration/test-schema-manifest.mjs
+          node scripts/migration/test-candidate-binding.mjs
+          node scripts/migration/test-workspace-inputs.mjs
+          node tests/platform/test-web-entrypoints.mjs
+          python3 docs/migration/recalculate-progress.py
+          node scripts/run-test.mjs web/tests/zones/test-verified-zone-stages.mts
+          pnpm run test:migration-status
+          node --test scripts/next-web/ecr-release.test.mjs scripts/next-web/preflight-scan.test.mjs
+          pnpm run test:mobile-pinned
+          node scripts/run-test.mjs web/tests/ai/test-ai-chat-history.mts
+          node scripts/run-test.mjs web/tests/simulator/test-redev-calc.mts
+          node scripts/run-test.mjs tests/platform/test-source-sync-20261018.mts
+          node scripts/run-test.mjs tests/platform/test-source-sync-20261020.mts
+          node scripts/run-test.mjs web/tests/map/test-map-overlay.mts
+          node scripts/run-test.mjs tests/map/test-dev-zones.mts
+          node scripts/run-test.mjs web/tests/map/test-parcel-prices.mts
+          node scripts/run-test.mjs web/tests/map/test-map-zone-metrics.mts
+          node scripts/run-test.mjs web/tests/home/test-home-zone-metrics.mts
+          node scripts/run-test.mjs web/tests/simulator/test-compare-zone-facts.mts
+          node scripts/run-test.mjs web/tests/simulator/test-compare-buy-timeline.mts
+          node scripts/run-test.mjs tests/map/test-rebuild-draft-builder.mts
+          node scripts/run-test.mjs tests/platform/test-public-artifacts-guard.ts
+          node scripts/migration/check-fixed-functional.mjs
+          node --import tsx server/tests/operations-control.ts
+          node --import tsx server/tests/deployment-configuration.ts
+          node --import tsx server/tests/deployment-cli.ts
+          node --import tsx server/tests/backup-transport.ts
+          node --import tsx server/tests/backup-envelope.ts
+          node --import tsx server/tests/checkpoint-backup.ts
+          node --import tsx server/tests/nonres-csv.ts
+          node --import tsx server/tests/domain-reference-integrity.ts
+          node --import tsx server/tests/auth-source-validation.ts
+          node --import tsx server/tests/collector-source-validation.ts
+          node --import tsx server/tests/member-route-inputs.ts
+          node scripts/run-test.mjs web/tests/auth/test-member-session.mts
+          node scripts/run-test.mjs web/tests/auth/test-member-logout.mts
+          node scripts/run-test.mjs web/tests/auth/test-two-sessions.mts
+          node scripts/run-test.mjs web/tests/notices/test-press-pdf-public.mts
+          node scripts/run-test.mjs web/tests/zones/test-zone-market-prices.mts
+          node scripts/run-test.mjs web/tests/zones/test-zone-read-pages.mts
+          node scripts/run-test.mjs web/tests/ai/test-ai-error-messages.mts
+          node scripts/run-test.mjs web/tests/zones/test-zone-card-trades.mts
+          node scripts/run-test.mjs web/tests/zones/test-zone-overview-trades.mts
+          node scripts/run-test.mjs web/tests/trades/test-spatial-parcels.mts
+          node scripts/run-test.mjs web/tests/platform/test-batch21-source-screens.mts
+          node scripts/run-test.mjs web/tests/trades/test-housing-price-browser.mts
+          node scripts/run-test.mjs web/tests/platform/test-date-only.mts
+          node scripts/run-test.mjs web/tests/platform/test-self-destroying-sw.mjs
+          node scripts/run-test.mjs web/tests/platform/test-api-error-message.mts
+          node scripts/run-test.mjs web/tests/platform/test-zone-center.mts
+          node scripts/run-test.mjs web/tests/notices/test-district-notices.mts
+          node scripts/next-web/test-cloudfront-viewer-request.mjs
+          node scripts/next-web/test-public-build-env.mjs
+          node scripts/next-web/test-robots-policy.mjs
+          node scripts/next-web/test-url-hardening.mjs
+          node scripts/next-web/test-internal-public-api.mjs
+          node scripts/run-test.mjs web/tests/auth/test-kakao-client.mts
+          node scripts/run-test.mjs web/tests/zones/test-zone-reference-address.mts
+          node scripts/run-test.mjs tests/trades/test-trade-risk.mts
+      - name: Compare offline matching with the pre-refactor corpus
+        if: steps.scope.outputs.full == 'true'
+        run: PYTHONDONTWRITEBYTECODE=1 python3 tests/data/test_offline_pipelines.py --full-corpus
+      - name: Complete client and native contract regressions
+        if: steps.scope.outputs.code == 'true'
+        run: pnpm test
+      - name: Reclaim completed rehearsal image caches
+        if: steps.scope.outputs.full == 'true'
+        run: |
+          if [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
+            docker builder prune --all --force
+            docker image prune --all --force
+            df -h .
+          fi
+      - name: Build and verify production web and proxy containers
+        if: steps.scope.outputs.full == 'true'
+        run: |
+          node --test scripts/next-web/prepare-context.test.mjs
+          if [ "${GITHUB_ACTIONS:-}" = true ]; then
+            node scripts/next-web/prepare-context.mjs --ci-validation > /tmp/next-context.json
+          else
+            node scripts/next-web/prepare-context.mjs > /tmp/next-context.json
+          fi
+          context=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/next-context.json')).context")
+          docker build --platform linux/amd64 --build-arg WEB_BUILD_ID=ci-${{ github.sha }} --build-arg SOURCE_REVISION=${{ github.sha }} -f "$context/deploy/next-web/Dockerfile" -t jaeview-ci-web "$context"
+          docker build --platform linux/amd64 -f deploy/next-web/proxy.Dockerfile -t jaeview-ci-proxy deploy/next-web
+          JAEVIEW_WEB_IMAGE=jaeview-ci-web JAEVIEW_PROXY_IMAGE=jaeview-ci-proxy node scripts/next-web/origin-smoke.mjs
+          rm -rf "$context" /tmp/next-context.json

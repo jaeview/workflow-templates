@@ -1,0 +1,81 @@
+name: Remote operations (Mac mini)
+run-name: 'ops ${{ inputs.target }} ${{ inputs.request_id }}'
+on:
+  workflow_call:
+    inputs:
+      request_id: {description: Caller request UUID, type: string, required: true}
+      target: {description: Server (aws or oci), type: string, required: true}
+      access: {description: Fixed operations permission (read or write), type: string, required: true}
+      payload: {description: Encrypted request, type: string, required: true}
+  push:
+    branches: [main]
+    paths: [.github/workflows/remote-operations.yml]
+  workflow_dispatch:
+    inputs:
+      request_id: {description: Caller request UUID, type: string, required: true}
+      target: {description: Server, type: choice, options: [aws, oci], required: true}
+      access: {description: Fixed operations permission, type: choice, options: [read, write], required: true}
+      payload: {description: Encrypted request, type: string, required: true}
+permissions: {}
+concurrency:
+  group: remote-operations-${{ inputs.target }}
+  cancel-in-progress: false
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - run: echo "Operations workflow registered. No server command executed."
+  operations:
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.repository == 'jaeview/jaeview-web' && github.repository_id == '1384694704' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Verify the initiating collaborator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const r=await fetch(`https://api.github.com/repos/jaeview/jaeview-web/collaborators/${encodeURIComponent(process.env.GITHUB_ACTOR)}/permission`,{headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json'}});
+          assert(r.ok,'cannot verify initiating collaborator');const p=await r.json();
+          assert(['admin','write','maintain'].includes(p.permission),'repository write access is required');
+          assert.equal(String(p.user.id),process.env.GITHUB_ACTOR_ID);
+          assert.equal(process.env.GITHUB_ACTOR,process.env.GITHUB_TRIGGERING_ACTOR,'a different user must create a new request, not rerun this one');
+          JS
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.access == 'write' && 'arn:aws:iam::357878953679:role/JaeviewGitHubOpsWriteRole' || 'arn:aws:iam::357878953679:role/JaeviewGitHubOpsReadRole' }}
+          aws-region: ap-northeast-2
+          allowed-account-ids: '357878953679'
+          role-session-name: ops-${{ github.actor_id }}-${{ github.run_id }}
+          unset-current-credentials: true
+          output-credentials: false
+      - name: Execute fixed operations command
+        env:
+          OPS_TARGET: ${{ inputs.target }}
+          OPS_ACCESS: ${{ inputs.access }}
+          OPS_PAYLOAD: ${{ inputs.payload }}
+          OPS_REQUEST_ID: ${{ inputs.request_id }}
+          OPS_NODE: ${{ inputs.target == 'aws' && vars.JAEVIEW_AWS_SSM_NODE_ID || vars.JAEVIEW_OCI_SSM_NODE_ID }}
+          OPS_RECEIPT_DIR: ${{ runner.temp }}/ops-receipt
+          AWS_PAGER: ''
+        run: node scripts/operations/control.mts
+      - name: Retain encrypted result and command identity
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ops-receipt/
+          retention-days: 7
+          if-no-files-found: warn

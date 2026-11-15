@@ -1,0 +1,14 @@
+{
+  "name": "workspace-tools CI (Mac mini Reusable Caller)",
+  "description": "Calls jaeview/workflow-templates reusable CI workflow on Mac mini [self-hosted, macOS, ARM64].",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration",
+    "TypeScript",
+    "Node.js"
+  ],
+  "filePatterns": [
+    "package.json",
+    "tsconfig.json"
+  ]
+}

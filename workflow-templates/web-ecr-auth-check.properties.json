@@ -1,0 +1,13 @@
+{
+  "name": "jaeview-web Web ECR Auth Check (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] GitHub OIDC and AWS ECR read-only authentication diagnostic.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration",
+    "AWS"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

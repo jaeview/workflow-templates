@@ -1,0 +1,14 @@
+{
+  "name": "jaeview-web Web ECR Build and Publish (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] linux/amd64 Web & Proxy image build, smoke test, macOS ARM64 Trivy scan, and AWS ECR publisher.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Deployment",
+    "Docker",
+    "AWS"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

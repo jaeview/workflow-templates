@@ -1,0 +1,14 @@
+{
+  "name": "jaeview-web Self-Hosted Migration Checks (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] CI validation workflow for jaeview/jaeview-web (compatible with scripts/deploy/checks.mts).",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration",
+    "TypeScript",
+    "Next.js"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

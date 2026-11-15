@@ -1,0 +1,14 @@
+{
+  "name": "jaeview-web Develop Verified Images (Mac mini)",
+  "description": "Mac mini [self-hosted, macOS, ARM64] native ARM64 dev image build, smoke test, and GHCR publish workflow.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Deployment",
+    "Docker",
+    "ARM64"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

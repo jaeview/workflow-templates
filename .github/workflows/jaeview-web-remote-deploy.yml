@@ -1,0 +1,100 @@
+name: Remote AWS and OCI deployment (Mac mini)
+run-name: '${{ inputs.operation }} ${{ inputs.target }} ${{ inputs.request_id }}'
+on:
+  workflow_call:
+    inputs:
+      request_id:
+        description: Optional caller correlation ID
+        type: string
+        required: false
+        default: ''
+      operation:
+        description: Deploy a verified release, inspect status, or restore previous images
+        type: string
+        required: true
+        default: 'status'
+      target:
+        description: AWS web or OCI API and worker
+        type: string
+        required: true
+      release_run_id:
+        description: Successful web-ecr-publish or api-ecr-publish run ID (deploy only)
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Optional caller correlation ID
+        type: string
+        default: ''
+      operation:
+        description: Deploy a verified release, inspect status, or restore previous images
+        type: choice
+        options: [status, deploy, rollback]
+        default: status
+        required: true
+      target:
+        description: AWS web or OCI API and worker
+        type: choice
+        options: [aws, oci]
+        required: true
+      release_run_id:
+        description: Successful web-ecr-publish or api-ecr-publish run ID (deploy only)
+        type: string
+        default: ''
+permissions: {}
+concurrency:
+  group: remote-deploy-${{ inputs.target }}
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.repository == 'jaeview/jaeview-web' && github.repository_id == '1384694704' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AWS_PAGER: ''
+      DEPLOY_OPERATION: ${{ inputs.operation }}
+      DEPLOY_TARGET: ${{ inputs.target }}
+      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+      DEPLOY_NODE_ID: ${{ inputs.target == 'aws' && vars.JAEVIEW_AWS_SSM_NODE_ID || vars.JAEVIEW_OCI_SSM_NODE_ID }}
+      DEPLOY_DOCUMENT_VERSION: ${{ vars.JAEVIEW_DEPLOY_DOCUMENT_VERSION }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Validate deployment control code
+        run: |
+          node --test scripts/deploy/control.test.mjs
+          node --test deploy/remote/*.test.mts scripts/deploy/*.test.mts
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.JAEVIEW_DEPLOY_ROLE_ARN }}
+          aws-region: ap-northeast-2
+          allowed-account-ids: '357878953679'
+          role-session-name: remote-deploy-${{ github.run_id }}
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          output-credentials: false
+      - name: Execute and verify the bounded host operation
+        env:
+          DEPLOY_RECEIPT_DIR: ${{ runner.temp }}/deploy-receipt
+        run: node scripts/deploy/control.mjs control
+      - name: Retain deployment receipt, including uncertain outcomes
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deployment-${{ inputs.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deploy-receipt/
+          retention-days: 90
+          if-no-files-found: warn
