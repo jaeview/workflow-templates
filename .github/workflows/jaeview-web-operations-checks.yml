@@ -47,15 +47,38 @@ jobs:
           node-version-file: .node-version
       - name: Select safe Docker context on Mac mini
         run: |
-          if docker context inspect colima-jaeview-release >/dev/null 2>&1; then
-            printf 'DOCKER_CONTEXT=colima-jaeview-release\n' >> "$GITHUB_ENV"
-          else
-            ctx=$(docker context show 2>/dev/null || echo default)
-            if [ "$ctx" = "colima-jaeview" ]; then
-              echo "::error::Refusing to run in protected Docker context colima-jaeview"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+            printf 'PATH=/opt/homebrew/bin:/usr/local/bin:%s/.local/bin:%s\n' "$HOME" "$PATH" >> "$GITHUB_ENV"
+            selected_ctx=""
+            for candidate in "${JAEVIEW_RELEASE_DOCKER_CONTEXT:-}" "${DOCKER_CONTEXT:-}" colima-jaeview-release "$(docker context show 2>/dev/null || true)" default orbstack desktop-linux colima; do
+              if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
+                continue
+              fi
+              if docker --context "$candidate" info >/dev/null 2>&1; then
+                selected_ctx="$candidate"
+                break
+              fi
+            done
+            if [ -z "$selected_ctx" ] && command -v colima >/dev/null 2>&1; then
+              prev_ctx=$(docker context show 2>/dev/null || true)
+              if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "jaeview-release"; then
+                colima start --profile jaeview-release
+              else
+                colima start --profile jaeview-release --arch aarch64 --vm-type vz --vz-rosetta --cpu 4 --memory 8 --disk 60 --mount "$HOME:w"
+              fi
+              if [ -n "$prev_ctx" ]; then
+                docker context use "$prev_ctx" >/dev/null 2>&1 || true
+              fi
+              if docker --context colima-jaeview-release info >/dev/null 2>&1; then
+                selected_ctx="colima-jaeview-release"
+              fi
+            fi
+            if [ -z "$selected_ctx" ] || [ "$selected_ctx" = "colima-jaeview" ]; then
+              echo "::error::No usable non-protected Docker context is running on the Mac mini runner"
               exit 1
             fi
-            printf 'DOCKER_CONTEXT=%s\n' "$ctx" >> "$GITHUB_ENV"
+            printf 'DOCKER_CONTEXT=%s\n' "$selected_ctx" >> "$GITHUB_ENV"
           fi
       - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
       - run: pnpm --filter jaeview-operations-runtime install --frozen-lockfile --ignore-scripts
