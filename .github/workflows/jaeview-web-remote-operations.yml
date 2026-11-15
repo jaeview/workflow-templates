@@ -3,19 +3,26 @@ run-name: 'ops ${{ inputs.target }} ${{ inputs.request_id }}'
 on:
   workflow_call:
     inputs:
-      request_id: {description: Caller request UUID, type: string, required: true}
-      target: {description: Server (aws or oci), type: string, required: true}
-      access: {description: Fixed operations permission (read or write), type: string, required: true}
-      payload: {description: Encrypted request, type: string, required: true}
+      request_id: { description: Caller request UUID, type: string, required: true }
+      target: { description: Server (aws or oci), type: string, required: true }
+      access:
+        { description: Fixed operations permission (read or write), type: string, required: true }
+      payload: { description: Encrypted request, type: string, required: true }
   push:
     branches: [main]
     paths: [.github/workflows/remote-operations.yml]
   workflow_dispatch:
     inputs:
-      request_id: {description: Caller request UUID, type: string, required: true}
-      target: {description: Server, type: choice, options: [aws, oci], required: true}
-      access: {description: Fixed operations permission, type: choice, options: [read, write], required: true}
-      payload: {description: Encrypted request, type: string, required: true}
+      request_id: { description: Caller request UUID, type: string, required: true }
+      target: { description: Server, type: choice, options: [aws, oci], required: true }
+      access:
+        {
+          description: Fixed operations permission,
+          type: choice,
+          options: [read, write],
+          required: true,
+        }
+      payload: { description: Encrypted request, type: string, required: true }
 permissions: {}
 concurrency:
   group: remote-operations-${{ inputs.target }}
