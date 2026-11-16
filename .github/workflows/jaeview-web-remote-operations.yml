@@ -8,9 +8,6 @@ on:
       access:
         { description: Fixed operations permission (read or write), type: string, required: true }
       payload: { description: Encrypted request, type: string, required: true }
-  push:
-    branches: [main]
-    paths: [.github/workflows/remote-operations.yml]
   workflow_dispatch:
     inputs:
       request_id: { description: Caller request UUID, type: string, required: true }
@@ -28,11 +25,6 @@ concurrency:
   group: remote-operations-${{ inputs.target }}
   cancel-in-progress: false
 jobs:
-  register:
-    if: github.event_name == 'push'
-    runs-on: [self-hosted, macOS, ARM64]
-    steps:
-      - run: echo "Operations workflow registered. No server command executed."
   operations:
     if: (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && github.repository == 'jaeview/jaeview-web' && github.repository_id == '1384694704' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, macOS, ARM64]

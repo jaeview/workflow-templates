@@ -2,7 +2,7 @@
 
 Mac mini Apple Silicon (`[self-hosted, macOS, ARM64]`) 자체 호스팅 러너를 위한 `jaeview/jaeview-web` 및 `jaeview/workspace-tools` GitHub Actions 워크플로 모음입니다.
 
-- **`.github/workflows/`**: 다른 저장소에서 `uses: jaeview/workflow-templates/.github/workflows/<파일명>@main`으로 바로 호출할 수 있는 **Reusable Workflows (`workflow_call`)** 및 수동 실행(`workflow_dispatch`) 정의
+- **`.github/workflows/`**: 다른 저장소에서 `uses: jaeview/workflow-templates/.github/workflows/<파일명>@main`으로 바로 호출할 수 있는 **Reusable Workflows (`workflow_call`)** 및 수동 실행(`workflow_dispatch`) 정의 (`workflow-templates` 저장소 자체 푸시에서는 불필요하게 실행되지 않도록 `push`/`pull_request` 트리거를 두지 않습니다)
 - **`workflow-templates/`**: 각 저장소(`.github/workflows/`)에 복사해 넣거나 GitHub Starter Workflow로 사용할 수 있는 **Standalone / Caller 템플릿 (`.yml` + `.properties.json`)**
 
 ---
@@ -12,8 +12,8 @@ Mac mini Apple Silicon (`[self-hosted, macOS, ARM64]`) 자체 호스팅 러너�
 | 항목 | 적용 내용 |
 | --- | --- |
 | **러너 라벨** | `runs-on: [self-hosted, macOS, ARM64]` |
-| **보호된 Docker Context 차단** | 보존 데이터(Supabase 백업 등)가 있는 `colima-jaeview` 컨텍스트는 실행을 거부하며, `colima-jaeview-release`가 있으면 우선 선택합니다. |
-| **Colima VM 바인드 마운트 경로** | macOS 기본 `/var/folders`는 Colima VM과 공유되지 않으므로, 컨테이너에 마운트되는 임시 경로(`TMPDIR`, `ORIGIN_CHECK_TMP_ROOT`)를 `$HOME/.cache/jaeview-ci-tmp/<run_id>` 아래로 지정합니다. |
+| **보호된 Docker Context 차단** | 보존 데이터(Supabase 백업 등)가 있는 `colima-jaeview` 컨텍스트는 실행을 거부하며, `colima-jaeview-release`를 기본 2GiB `colima`/`default` 컨텍스트보다 먼저 확인·기동(24GB 이상 호스트 12GB, 그 외 8GB/6GB)하고 `io.containerd.snapshotter`가 켜져 있으면 `overlay2`로 자동 복구합니다. |
+| **Colima VM 바인드 마운트 경로** | macOS 기본 `/var/folders`는 Colima VM과 공유되지 않으므로, 컨테이너에 마운트되는 임시 경로(`TMPDIR`, `ORIGIN_CHECK_TMP_ROOT`)를 `$HOME/.cache/jaeview-ci-tmp/<run_id>` 아래로 지정하며 2일 이상 지난 임시 폴더는 자동 정리합니다. |
 | **Apple Silicon 네이티브 DB/API 검사** | `fresh-schema.sh` 실행 시 PostGIS(`postgis/postgis:17-3.5`)는 `linux/amd64`(Rosetta)로, API 컨테이너는 `JAEVIEW_SCHEMA_API_PLATFORM=linux/arm64` 네이티브로 실행하여 에뮬레이션 시 `esbuild` 충돌을 방지합니다. |
 | **macOS 호환 Postgres 17 서비스** | Linux 전용인 GitHub Actions `services:` 대신 `operations-checks.yml`에서 격리된 임시 `postgres:17` 컨테이너(`127.0.0.1::<ephemeral>:5432`, `trap` 자동 정리)를 띄웁니다. |
 | **macOS ARM64 Trivy & SHA-256 검증** | `web-ecr-publish.yml`에서 Darwin ARM64 감지 시 `trivy_0.76.0_macOS-ARM64.tar.gz`를 내려받고 Node `crypto`로 공식 `checksums.txt` SHA-256을 대조합니다. |

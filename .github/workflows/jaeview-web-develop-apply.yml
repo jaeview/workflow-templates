@@ -11,30 +11,28 @@ on:
         type: string
         required: false
         default: '1'
-  workflow_run:
-    workflows: [Develop verified images, 'Develop verified images (Mac mini)']
-    types: [completed]
-    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      publish_run_id:
+        description: Publish workflow run ID
+        type: string
+        required: true
+      publish_run_attempt:
+        description: Publish workflow run attempt
+        type: string
+        required: false
+        default: '1'
 permissions:
   contents: read
   actions: read
   packages: read
   id-token: write
 concurrency:
-  group: develop-apply
+  group: develop-apply-${{ github.repository }}
   cancel-in-progress: false
 jobs:
   apply:
-    if: >-
-      github.repository == 'jaeview/jaeview-web' &&
-      (
-        github.event_name == 'workflow_call' ||
-        (
-          github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.event == 'push' &&
-          github.event.workflow_run.head_repository.id == github.repository_id
-        )
-      )
+    if: github.repository == 'jaeview/jaeview-web' && (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 15
     steps:

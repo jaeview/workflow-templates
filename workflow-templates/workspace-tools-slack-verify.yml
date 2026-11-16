@@ -21,6 +21,9 @@ on:
       WORKSPACE_SLACK_TOKEN:
         description: Slack Bot token (required for verify mode)
         required: false
+      WORKSPACE_SLACK_TEST_CHANNEL:
+        description: Default dedicated Slack test channel ID
+        required: false
   workflow_dispatch:
     inputs:
       mode:
@@ -61,7 +64,7 @@ jobs:
         env:
           CHECK_MODE: ${{ inputs.mode || 'check' }}
           WORKSPACE_SLACK_TOKEN: ${{ secrets.WORKSPACE_SLACK_TOKEN }}
-          WORKSPACE_SLACK_TEST_CHANNEL: ${{ inputs.test_channel }}
+          WORKSPACE_SLACK_TEST_CHANNEL: ${{ inputs.test_channel || secrets.WORKSPACE_SLACK_TEST_CHANNEL || vars.WORKSPACE_SLACK_TEST_CHANNEL }}
         run: |
           case "$CHECK_MODE" in
             check)
