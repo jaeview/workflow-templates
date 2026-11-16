@@ -267,6 +267,7 @@ jobs:
           node --import tsx server/tests/domain-building-facts.ts
           node scripts/run-test.mjs server/tests/zone-news-matches.ts
           node scripts/run-test.mjs server/tests/zone-stage-presentation.ts
+          node scripts/run-test.mjs server/tests/zone-stage-regression.ts
           node scripts/run-test.mjs server/tests/zone-stage-pace.ts
           node scripts/run-test.mjs server/tests/redev-stats.ts
           node scripts/run-test.mjs server/tests/knowledge-intuitive.ts
@@ -343,6 +344,7 @@ jobs:
         run: |
           node --test scripts/deploy/control.test.mjs
           node --test deploy/remote/*.test.mts scripts/deploy/*.test.mts
+          node --test scripts/deploy/publication-stage-regression.test.mjs scripts/deploy/stage-smoke.test.mjs
           pnpm run typecheck:deploy
           pnpm run test:independence
           node tests/platform/test-independence-policy.mjs
