@@ -112,6 +112,22 @@ jobs:
               echo "::error::No usable non-protected Docker context is running on the Mac mini runner"
               exit 1
             fi
+            if [ "${GITHUB_ACTIONS:-}" = true ]; then
+              for cname in $(docker --context "$selected_ctx" ps -a --format '{{.Names}}\t{{.Status}}' | awk -F'\t' '$2 ~ /^(Exited|Created|Dead)/ {print $1}' | grep -E '^jaeview-(rehearsal|origin-check|ops-pg|api-smoke|schema-(api-)?test)-' || true); do
+                docker --context "$selected_ctx" rm -f "$cname" >/dev/null 2>&1 || true
+              done
+              docker --context "$selected_ctx" builder prune --keep-storage 12GB --force >/dev/null 2>&1 || docker --context "$selected_ctx" builder prune --filter 'until=24h' --force >/dev/null 2>&1 || true
+              free_kib=""
+              case "$selected_ctx" in
+                colima-*)
+                  free_kib=$(colima ssh --profile "${selected_ctx#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
+                  ;;
+              esac
+              if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
+                docker --context "$selected_ctx" builder prune --all --force >/dev/null 2>&1 || true
+                docker --context "$selected_ctx" image prune --all --force >/dev/null 2>&1 || true
+              fi
+            fi
             printf 'DOCKER_CONTEXT=%s\n' "$selected_ctx" >> "$GITHUB_ENV"
           fi
       - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund

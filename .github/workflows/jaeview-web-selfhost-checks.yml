@@ -124,6 +124,41 @@ jobs:
               echo "::error::No usable non-protected Docker context is running on the Mac mini runner"
               exit 1
             fi
+            if [ "${GITHUB_ACTIONS:-}" = true ]; then
+              for cname in $(docker --context "$selected_ctx" ps -a --format '{{.Names}}\t{{.Status}}' | awk -F'\t' '$2 ~ /^(Exited|Created|Dead)/ {print $1}' | grep -E '^jaeview-(rehearsal|origin-check|ops-pg|api-smoke|schema-(api-)?test)-' || true); do
+                docker --context "$selected_ctx" rm -f "$cname" >/dev/null 2>&1 || true
+              done
+              for net in $(docker --context "$selected_ctx" network ls --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-' || true); do
+                docker --context "$selected_ctx" network rm "$net" >/dev/null 2>&1 || true
+              done
+              for vol in $(docker --context "$selected_ctx" volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-|^jaeview-web-next-isr-local$' || true); do
+                docker --context "$selected_ctx" volume rm "$vol" >/dev/null 2>&1 || true
+              done
+              for img in $(docker --context "$selected_ctx" image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^jaeview-(api|web|next):jaeview-rehearsal-' || true); do
+                docker --context "$selected_ctx" rmi -f "$img" >/dev/null 2>&1 || true
+              done
+              docker --context "$selected_ctx" builder prune --keep-storage 12GB --force >/dev/null 2>&1 || docker --context "$selected_ctx" builder prune --filter 'until=24h' --force >/dev/null 2>&1 || true
+              free_kib=""
+              case "$selected_ctx" in
+                colima-*)
+                  free_kib=$(colima ssh --profile "${selected_ctx#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
+                  ;;
+                *)
+                  docker_root=$(docker --context "$selected_ctx" info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+                  if [ -n "$docker_root" ] && [ -d "$docker_root" ]; then
+                    free_kib=$(df -Pk "$docker_root" 2>/dev/null | awk 'NR==2 {print $4}' || true)
+                  fi
+                  ;;
+              esac
+              if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
+                docker --context "$selected_ctx" builder prune --all --force >/dev/null 2>&1 || true
+                docker --context "$selected_ctx" image prune --all --force >/dev/null 2>&1 || true
+              fi
+              if [ "${selected_ctx#colima-}" != "$selected_ctx" ]; then
+                colima ssh --profile "${selected_ctx#colima-}" -- df -h /var/lib/docker || true
+              fi
+              docker --context "$selected_ctx" system df || true
+            fi
             printf 'JAEVIEW_DOCKER_CONTEXT=%s\nDOCKER_CONTEXT=%s\n' "$selected_ctx" "$selected_ctx" >> "$GITHUB_ENV"
           fi
       - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
@@ -264,6 +299,23 @@ jobs:
             docker builder prune --all --force
             docker image prune --all --force
             df -h .
+          elif [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${DOCKER_CONTEXT:-}" ] && [ "${DOCKER_CONTEXT:-}" != "colima-jaeview" ]; then
+            free_kib=""
+            case "$DOCKER_CONTEXT" in
+              colima-*)
+                free_kib=$(colima ssh --profile "${DOCKER_CONTEXT#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
+                ;;
+            esac
+            if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
+              for img in $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^jaeview-(api|web|next):jaeview-rehearsal-' || true); do
+                docker rmi -f "$img" >/dev/null 2>&1 || true
+              done
+              for vol in $(docker volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-|^jaeview-web-next-isr-local$' || true); do
+                docker volume rm "$vol" >/dev/null 2>&1 || true
+              done
+              docker builder prune --all --force >/dev/null 2>&1 || true
+              docker image prune --all --force >/dev/null 2>&1 || true
+            fi
           fi
       - name: Full local Next, proxy, API and database deployment rehearsal
         if: steps.scope.outputs.full == 'true'
@@ -356,18 +408,38 @@ jobs:
             docker builder prune --all --force
             docker image prune --all --force
             df -h .
+          elif [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${DOCKER_CONTEXT:-}" ] && [ "${DOCKER_CONTEXT:-}" != "colima-jaeview" ]; then
+            for img in $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^jaeview-(api|web|next):jaeview-rehearsal-' || true); do
+              docker rmi -f "$img" >/dev/null 2>&1 || true
+            done
+            for vol in $(docker volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-' || true); do
+              docker volume rm "$vol" >/dev/null 2>&1 || true
+            done
+            docker builder prune --keep-storage 12GB --force >/dev/null 2>&1 || docker builder prune --filter 'until=24h' --force >/dev/null 2>&1 || true
+            free_kib=""
+            case "$DOCKER_CONTEXT" in
+              colima-*)
+                free_kib=$(colima ssh --profile "${DOCKER_CONTEXT#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
+                ;;
+            esac
+            if [ -n "$free_kib" ] && [ "$free_kib" -lt 15728640 ] 2>/dev/null; then
+              docker builder prune --all --force >/dev/null 2>&1 || true
+              docker image prune --all --force >/dev/null 2>&1 || true
+            fi
           fi
       - name: Build and verify production web and proxy containers
         if: steps.scope.outputs.full == 'true'
         run: |
           node --test scripts/next-web/prepare-context.test.mjs
+          next_ctx_file="${RUNNER_TEMP:-/tmp}/next-context-$$.json"
+          context=""
+          trap 'rm -rf "$context" "$next_ctx_file"' EXIT
           if [ "${GITHUB_ACTIONS:-}" = true ]; then
-            node scripts/next-web/prepare-context.mjs --ci-validation > /tmp/next-context.json
+            node scripts/next-web/prepare-context.mjs --ci-validation > "$next_ctx_file"
           else
-            node scripts/next-web/prepare-context.mjs > /tmp/next-context.json
+            node scripts/next-web/prepare-context.mjs > "$next_ctx_file"
           fi
-          context=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/next-context.json')).context")
+          context=$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1])).context" "$next_ctx_file")
           docker build --platform linux/amd64 --build-arg WEB_BUILD_ID=ci-${{ github.sha }} --build-arg SOURCE_REVISION=${{ github.sha }} -f "$context/deploy/next-web/Dockerfile" -t jaeview-ci-web "$context"
           docker build --platform linux/amd64 -f deploy/next-web/proxy.Dockerfile -t jaeview-ci-proxy deploy/next-web
           JAEVIEW_WEB_IMAGE=jaeview-ci-web JAEVIEW_PROXY_IMAGE=jaeview-ci-proxy node scripts/next-web/origin-smoke.mjs
-          rm -rf "$context" /tmp/next-context.json
