@@ -344,7 +344,7 @@ jobs:
         run: |
           node --test scripts/deploy/control.test.mjs
           node --test deploy/remote/*.test.mts scripts/deploy/*.test.mts
-          node --test scripts/deploy/publication-stage-regression.test.mjs scripts/deploy/stage-smoke.test.mjs
+          node --test scripts/deploy/publication-stage-regression.test.mjs scripts/deploy/stage-smoke.test.mjs scripts/deploy/publication-guard.test.mjs scripts/deploy/publication-guard-archive.test.mjs
           pnpm run typecheck:deploy
           pnpm run test:independence
           node tests/platform/test-independence-policy.mjs

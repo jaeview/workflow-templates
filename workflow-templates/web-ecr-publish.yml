@@ -10,12 +10,12 @@ on:
         required: false
         default: ''
       publication_tag:
-        description: Release tag holding the reviewed production zone publication (publication.tar.gz)
+        description: Release tag holding the reviewed production zone publication (<tag>.tar.gz, or publication.tar.gz before 11-11)
         type: string
         required: false
         default: ''
       publication_sha256:
-        description: SHA-256 of publication.tar.gz, required with publication_tag
+        description: SHA-256 of the publication archive, required with publication_tag
         type: string
         required: false
         default: ''
@@ -26,11 +26,11 @@ on:
         type: string
         default: ''
       publication_tag:
-        description: Release tag holding the reviewed production zone publication (publication.tar.gz)
+        description: Release tag holding the reviewed production zone publication (<tag>.tar.gz, or publication.tar.gz before 11-11)
         type: string
         default: ''
       publication_sha256:
-        description: SHA-256 of publication.tar.gz, required with publication_tag
+        description: SHA-256 of the publication archive, required with publication_tag
         type: string
         default: ''
 
@@ -190,7 +190,18 @@ jobs:
           [[ "$PUBLICATION_SHA256" =~ ^[a-f0-9]{64}$ ]]
           test ! -e web/.generated
           dir=$(mktemp -d "$RUNNER_TEMP/publication.XXXXXX")
-          gh release download "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --pattern publication.tar.gz --dir "$dir"
+          # 11-11 부터 묶음 이름은 <태그>.tar.gz, 11-08 이전 릴리스는 publication.tar.gz (scripts/deploy/publication-guard.mjs 와 같은 순서)
+          assets=$(gh release view "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          asset=""
+          for name in "$PUBLICATION_TAG.tar.gz" publication.tar.gz; do
+            if grep -Fxq "$name" <<<"$assets"; then asset=$name; break; fi
+          done
+          if [ -z "$asset" ]; then
+            echo "No publication archive in $PUBLICATION_TAG: tried $PUBLICATION_TAG.tar.gz, publication.tar.gz; release has: $(echo $assets)" >&2
+            exit 1
+          fi
+          gh release download "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$dir"
+          [ "$asset" = publication.tar.gz ] || mv "$dir/$asset" "$dir/publication.tar.gz"
           node -e '
             const crypto = require("node:crypto");
             const fs = require("node:fs");
