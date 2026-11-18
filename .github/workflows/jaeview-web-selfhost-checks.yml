@@ -232,12 +232,15 @@ jobs:
           REGISTRY_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
         run: node scripts/ci/prepare-publication.mjs
-      - name: Check stage corrections and Next production runtime
+      - name: Check stage corrections and build Next production output
+        env:
+          JAEVIEW_CI_NEXT_WORKERS: '4'
         run: |
           node scripts/checks/check-zone-safety.mjs
           node scripts/run-test.mjs web/tests/zones/test-stage-date-cache.mts
           pnpm run build
-          pnpm run typecheck:next
+      - name: Check Next production runtime
+        run: |
           next_port=$(bash scripts/ci/setup-mac-runner.sh allocate-port)
           next_log="$RUNNER_TEMP/jaeview-next-$next_port.log"
           set -m

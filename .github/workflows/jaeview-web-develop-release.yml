@@ -54,9 +54,10 @@ jobs:
           docker build --platform linux/arm64 --label org.opencontainers.image.revision="$GITHUB_SHA" --label org.opencontainers.image.source=https://github.com/jaeview/jaeview-web -f server/Dockerfile -t "$TEST_API_IMAGE" .
           docker build --platform linux/arm64 -f deploy/postgis/Dockerfile -t "$TEST_POSTGIS_IMAGE" .
           docker build --platform linux/arm64 --build-arg POSTGIS_IMAGE="$TEST_POSTGIS_IMAGE" -f deploy/test/shared-oci/db.Dockerfile -t "$TEST_DB_IMAGE" .
-          node deploy/test/shared-oci/stack-smoke.mjs
-          node deploy/test/shared-oci/live-read-smoke.mjs
-          node deploy/test/shared-oci/access-smoke.mjs
+          node --test --test-concurrency=2 --test-reporter=spec \
+            deploy/test/shared-oci/stack-smoke.mjs \
+            deploy/test/shared-oci/live-read-smoke.mjs \
+            deploy/test/shared-oci/access-smoke.mjs
           py_bin="python3"
           if ! "$py_bin" -c 'import cryptography' >/dev/null 2>&1; then
             if [ "$(uname -s)" = "Darwin" ]; then

@@ -4,6 +4,10 @@ run-name: 'Web publish ${{ inputs.request_id }}'
 on:
   workflow_call:
     inputs:
+      source_sha:
+        description: Expected main commit (optional)
+        type: string
+        default: ''
       request_id:
         description: Optional caller correlation ID
         type: string
@@ -21,6 +25,10 @@ on:
         default: ''
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: Main commit verified by the release CLI (optional for manual dispatch)
+        type: string
+        default: ''
       request_id:
         description: Optional caller correlation ID
         type: string
@@ -45,7 +53,8 @@ jobs:
     if: >-
       github.repository == 'jaeview/jaeview-web' &&
       github.repository_id == '1384694704' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      (inputs.source_sha == '' || inputs.source_sha == github.sha)
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
     permissions:
@@ -77,6 +86,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           clean: true
+      - name: Require successful CI for this commit or its nearest code commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+          if [[ -n "$PREFLIGHT_SOURCE_SHA" ]]; then
+            node scripts/deploy/control.mjs require-ci --once
+          else
+            node scripts/deploy/control.mjs require-ci
+          fi
       - name: Configure Mac runner and Docker context
         run: bash scripts/ci/setup-mac-runner.sh setup release docker
 
@@ -92,37 +112,11 @@ jobs:
           [[ "$PUBLICATION_SHA256" =~ ^[a-f0-9]{64}$ ]]
           test ! -e web/.generated
           dir=$(mktemp -d "$RUNNER_TEMP/publication.XXXXXX")
-          # 11-11 부터 묶음 이름은 <태그>.tar.gz, 11-08 이전 릴리스는 publication.tar.gz (scripts/deploy/publication-guard.mjs 와 같은 순서)
-          assets=$(gh release view "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
-          asset=""
-          for name in "$PUBLICATION_TAG.tar.gz" publication.tar.gz; do
-            if grep -Fxq "$name" <<<"$assets"; then asset=$name; break; fi
-          done
-          if [ -z "$asset" ]; then
-            echo "No publication archive in $PUBLICATION_TAG: tried $PUBLICATION_TAG.tar.gz, publication.tar.gz; release has: $(echo $assets)" >&2
-            exit 1
-          fi
-          gh release download "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$dir"
-          [ "$asset" = publication.tar.gz ] || mv "$dir/$asset" "$dir/publication.tar.gz"
-          node -e '
-            const crypto = require("node:crypto");
-            const fs = require("node:fs");
-            const actual = crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex");
-            if (actual !== process.env.PUBLICATION_SHA256) {
-              console.error(`SHA-256 mismatch: expected ${process.env.PUBLICATION_SHA256}, got ${actual}`);
-              process.exit(1);
-            }
-          ' "$dir/publication.tar.gz"
-          tar -tzvf "$dir/publication.tar.gz" | awk '$1 !~ /^[-d]/ { bad=1 } END { exit bad }'
-          tar -tzf "$dir/publication.tar.gz" | grep -Ev '^(zone-documents\.json|home-moves\.json|zone-card-publications/|zone-card-publications/manifest\.json|zone-card-publications/[a-z0-9]+(-[a-z0-9]+)*\.json)$' && exit 1
+          trap 'rm -rf -- "$dir"' EXIT
+          node scripts/deploy/release-publication-download.mjs "$dir"
           mkdir -p web/.generated
           tar -xzf "$dir/publication.tar.gz" -C web/.generated --no-same-owner --no-same-permissions
           test ! -e web/.generated/ci-publication.json
-
-      - name: Require successful CI for this commit or its nearest code commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/deploy/control.mjs require-ci
 
       - name: Build clean linux amd64 web images
         run: |
@@ -154,34 +148,7 @@ jobs:
           node scripts/next-web/origin-smoke.mjs
 
       - name: Scan local OS packages before AWS authentication
-        run: |
-          scanner_dir=$(mktemp -d "$RUNNER_TEMP/trivy.XXXXXX")
-          trap 'rm -rf -- "$scanner_dir"' EXIT
-          if [ "$(uname -s)" = "Darwin" ]; then
-            trivy_asset="trivy_0.76.0_macOS-ARM64.tar.gz"
-          else
-            trivy_asset="trivy_0.76.0_Linux-64bit.tar.gz"
-          fi
-          base_url="https://github.com/aquasecurity/trivy/releases/download/v0.76.0"
-          curl --fail --location --retry 3 --proto '=https' \
-            "${base_url}/${trivy_asset}" \
-            --output "$scanner_dir/$trivy_asset"
-          curl --fail --location --retry 3 --proto '=https' \
-            "${base_url}/trivy_0.76.0_checksums.txt" \
-            --output "$scanner_dir/checksums.txt"
-          node -e '
-            const crypto = require("node:crypto");
-            const fs = require("node:fs");
-            const [dir, asset] = process.argv.slice(1);
-            const sums = fs.readFileSync(`${dir}/checksums.txt`, "utf8").split("\n");
-            const line = sums.find((l) => l.endsWith(`  ${asset}`));
-            const expected = line ? line.split(/\s+/)[0] : "";
-            if (!/^[a-f0-9]{64}$/.test(expected)) throw Error("Checksum entry missing");
-            const actual = crypto.createHash("sha256").update(fs.readFileSync(`${dir}/${asset}`)).digest("hex");
-            if (actual !== expected) throw Error(`Trivy SHA-256 mismatch: ${actual} !== ${expected}`);
-          ' "$scanner_dir" "$trivy_asset"
-          tar -xzf "$scanner_dir/$trivy_asset" -C "$scanner_dir" trivy
-          TRIVY_BIN="$scanner_dir/trivy" node scripts/next-web/preflight-scan.mjs "$RELEASE_DIR"
+        run: node scripts/next-web/trivy-download.mjs "$RELEASE_DIR"
 
       - name: Authenticate for ECR upload
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0

@@ -4,6 +4,10 @@ run-name: 'API publish ${{ inputs.request_id }}'
 on:
   workflow_call:
     inputs:
+      source_sha:
+        description: Expected main commit (optional)
+        type: string
+        default: ''
       request_id:
         description: Optional caller correlation ID
         type: string
@@ -11,6 +15,10 @@ on:
         default: ''
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: Main commit verified by the release CLI (optional for manual dispatch)
+        type: string
+        default: ''
       request_id:
         description: Optional caller correlation ID
         type: string
@@ -21,7 +29,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
-    if: github.repository == 'jaeview/jaeview-web' && github.repository_id == '1384694704' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'jaeview/jaeview-web' &&
+      github.repository_id == '1384694704' &&
+      github.ref == 'refs/heads/main' &&
+      (inputs.source_sha == '' || inputs.source_sha == github.sha)
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 40
     permissions:
@@ -42,6 +54,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .node-version
+      - name: Require successful CI for this commit or its nearest code commit
+        shell: bash
+        env:
+          PREFLIGHT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+          if [[ -n "$PREFLIGHT_SOURCE_SHA" ]]; then
+            node scripts/deploy/control.mjs require-ci --once
+          else
+            node scripts/deploy/control.mjs require-ci
+          fi
       - name: Select safe Docker context on Mac mini
         run: bash scripts/ci/setup-mac-runner.sh setup release docker
       - name: Install pinned pnpm for this job
@@ -51,7 +74,6 @@ jobs:
           printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
       - name: Require exact source checks
         run: |
-          node scripts/deploy/control.mjs require-ci
           node --test scripts/deploy/control.test.mjs
           pnpm --filter @jaeview/server install --frozen-lockfile --ignore-scripts
           pnpm --dir server typecheck
