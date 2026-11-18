@@ -335,7 +335,7 @@ jobs:
       - name: Fresh SQL, narrow permissions, API and OAuth recovery
         if: matrix.task == 'fresh-sql'
         run: |
-          slot=$(bash scripts/ci/setup-mac-runner.sh docker-slot acquire)
+          slot=$(bash scripts/ci/setup-mac-runner.sh docker-slot acquire fresh-sql)
           trap 'bash scripts/ci/setup-mac-runner.sh docker-slot release "$slot"' EXIT
           node --test server/tests/init-independent-db.test.mjs
           JAEVIEW_SCHEMA_API_IMAGE="jaeview-schema-api:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
