@@ -4,6 +4,10 @@ run-name: 'Web publish ${{ inputs.request_id }}'
 on:
   workflow_call:
     inputs:
+      source_sha:
+        description: Expected main commit (optional)
+        type: string
+        default: ''
       request_id:
         description: Optional caller correlation ID
         type: string
@@ -21,6 +25,10 @@ on:
         default: ''
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: Main commit verified by the release CLI (optional for manual dispatch)
+        type: string
+        default: ''
       request_id:
         description: Optional caller correlation ID
         type: string
@@ -45,7 +53,8 @@ jobs:
     if: >-
       github.repository == 'jaeview/jaeview-web' &&
       github.repository_id == '1384694704' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      (inputs.source_sha == '' || inputs.source_sha == github.sha)
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
     permissions:
@@ -60,123 +69,36 @@ jobs:
       REGISTRY: 357878953679.dkr.ecr.ap-northeast-2.amazonaws.com
       NODE_IMAGE: node@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797
       NGINX_IMAGE: nginx@sha256:cc93106876eedec3e662e46adb019cd1d2cfae7ccdeb7eb411eeb932d90e9701
-      JAEVIEW_WEB_IMAGE: jaeview-next-web:ci
-      JAEVIEW_PROXY_IMAGE: jaeview-next-proxy:ci
-      COMPOSE_PROJECT_NAME: jaeview-web-ci
+      JAEVIEW_WEB_IMAGE: jaeview-next-web:ci-${{ github.run_id }}-${{ github.run_attempt }}
+      JAEVIEW_PROXY_IMAGE: jaeview-next-proxy:ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 26.12.1
-      - name: Check the publish role, Docker context and release paths
+      - name: Check the publish role
         env:
           CONFIGURED_ROLE: ${{ vars.JAEVIEW_WEB_ECR_ROLE_ARN }}
         run: |
           printf 'RELEASE_DIR=%s/web-release\nWEB_BUILD_METADATA=%s/web-build.json\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
           test "$CONFIGURED_ROLE" = 'arn:aws:iam::357878953679:role/JaeviewWebGitHubEcrPushRole'
-          if [ "$(uname -s)" = "Darwin" ]; then
-            export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-            printf 'PATH=/opt/homebrew/bin:/usr/local/bin:%s/.local/bin:%s\n' "$HOME" "$PATH" >> "$GITHUB_ENV"
-            ci_tmp_root="$HOME/.cache/jaeview-ci-tmp"
-            find "$ci_tmp_root" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf -- {} + 2>/dev/null || true
-            ci_tmp="$ci_tmp_root/${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-web"
-            mkdir -p "$ci_tmp"
-            chmod 700 "$ci_tmp"
-            printf 'TMPDIR=%s\nORIGIN_CHECK_TMP_ROOT=%s\n' "$ci_tmp" "$ci_tmp" >> "$GITHUB_ENV"
-            selected_ctx=""
-            explicit_ctx="${DOCKER_CONTEXT:-}"
-            if [ "$explicit_ctx" = "default" ]; then
-              explicit_ctx=""
-            fi
-            for candidate in "${JAEVIEW_RELEASE_DOCKER_CONTEXT:-}" "$explicit_ctx" colima-jaeview-release; do
-              if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
-                continue
-              fi
-              if docker --context "$candidate" info >/dev/null 2>&1; then
-                selected_ctx="$candidate"
-                break
-              fi
-            done
-            if [ -z "$selected_ctx" ] && command -v colima >/dev/null 2>&1; then
-              prev_ctx=$(docker context show 2>/dev/null || true)
-              if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "jaeview-release"; then
-                colima start --profile jaeview-release
-              else
-                mem_gb=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
-                vm_mem=$(( mem_gb >= 24 ? 12 : (mem_gb >= 16 ? 8 : 6) ))
-                if /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
-                  colima start --profile jaeview-release --arch aarch64 --vm-type vz --vz-rosetta --cpu 4 --memory "$vm_mem" --disk 60 --mount "$HOME:w"
-                else
-                  colima start --profile jaeview-release --arch aarch64 --vm-type vz --cpu 4 --memory "$vm_mem" --disk 60 --mount "$HOME:w"
-                fi
-              fi
-              if [ -n "$prev_ctx" ]; then
-                docker context use "$prev_ctx" >/dev/null 2>&1 || true
-              fi
-              if docker --context colima-jaeview-release info >/dev/null 2>&1; then
-                selected_ctx="colima-jaeview-release"
-              fi
-            fi
-            if [ "$selected_ctx" = "colima-jaeview-release" ] && command -v colima >/dev/null 2>&1; then
-              driver_status=$(docker --context colima-jaeview-release info --format '{{json .DriverStatus}}' 2>/dev/null || true)
-              colima_cfg="$HOME/.colima/jaeview-release/colima.yaml"
-              case "$driver_status" in
-                *io.containerd.snapshotter*)
-                  if [ -f "$colima_cfg" ]; then
-                    node -e 'const fs=require("node:fs"),p=process.argv[1];let s=fs.readFileSync(p,"utf8");if(/^docker:\s*\{\}\s*$/m.test(s)){s=s.replace(/^docker:\s*\{\}\s*$/m,"docker:\n  features:\n    containerd-snapshotter: false");}else if(/^\s*containerd-snapshotter:\s*true\b/m.test(s)){s=s.replace(/^(\s*containerd-snapshotter:\s*)true\b/m,"$1false");}else if(/^docker:\s*\n  features:\s*$/m.test(s)){s=s.replace(/^(docker:\s*\n  features:\s*)$/m,"$1\n    containerd-snapshotter: false");}else if(/^docker:\s*$/m.test(s)){s=s.replace(/^docker:\s*$/m,"docker:\n  features:\n    containerd-snapshotter: false");}else if(!/containerd-snapshotter:\s*false\b/.test(s)){s=s.trimEnd()+"\ndocker:\n  features:\n    containerd-snapshotter: false\n";}fs.writeFileSync(p,s);' "$colima_cfg"
-                    prev_ctx=$(docker context show 2>/dev/null || true)
-                    colima restart --profile jaeview-release
-                    if [ -n "$prev_ctx" ]; then
-                      docker context use "$prev_ctx" >/dev/null 2>&1 || true
-                    fi
-                  fi
-                  ;;
-              esac
-            fi
-            if [ -z "$selected_ctx" ]; then
-              for candidate in "$(docker context show 2>/dev/null || true)" default orbstack desktop-linux colima; do
-                if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
-                  continue
-                fi
-                if docker --context "$candidate" info >/dev/null 2>&1; then
-                  selected_ctx="$candidate"
-                  break
-                fi
-              done
-            fi
-            if [ -z "$selected_ctx" ] || [ "$selected_ctx" = "colima-jaeview" ]; then
-              echo "::error::No usable non-protected Docker context is running on the Mac mini runner"
-              exit 1
-            fi
-            if [ "${GITHUB_ACTIONS:-}" = true ]; then
-              for cname in $(docker --context "$selected_ctx" ps -a --format '{{.Names}}\t{{.Status}}' | awk -F'\t' '$2 ~ /^(Exited|Created|Dead)/ {print $1}' | grep -E '^jaeview-(rehearsal|origin-check|ops-pg|api-smoke|schema-(api-)?test)-' || true); do
-                docker --context "$selected_ctx" rm -f "$cname" >/dev/null 2>&1 || true
-              done
-              for net in $(docker --context "$selected_ctx" network ls --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-' || true); do
-                docker --context "$selected_ctx" network rm "$net" >/dev/null 2>&1 || true
-              done
-              for vol in $(docker --context "$selected_ctx" volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-|^jaeview-web-next-isr-local$' || true); do
-                docker --context "$selected_ctx" volume rm "$vol" >/dev/null 2>&1 || true
-              done
-              docker --context "$selected_ctx" builder prune --keep-storage 12GB --force >/dev/null 2>&1 || docker --context "$selected_ctx" builder prune --filter 'until=24h' --force >/dev/null 2>&1 || true
-              free_kib=""
-              case "$selected_ctx" in
-                colima-*)
-                  free_kib=$(colima ssh --profile "${selected_ctx#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
-                  ;;
-              esac
-              if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
-                docker --context "$selected_ctx" builder prune --all --force >/dev/null 2>&1 || true
-                docker --context "$selected_ctx" image prune --all --force >/dev/null 2>&1 || true
-              fi
-            fi
-            printf 'DOCKER_CONTEXT=%s\n' "$selected_ctx" >> "$GITHUB_ENV"
-          fi
-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
           clean: true
+      - name: Require successful CI for this commit or its nearest code commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+          if [[ -n "$PREFLIGHT_SOURCE_SHA" ]]; then
+            node scripts/deploy/control.mjs require-ci --once
+          else
+            node scripts/deploy/control.mjs require-ci
+          fi
+      - name: Configure Mac runner and Docker context
+        run: bash scripts/ci/setup-mac-runner.sh setup release docker
 
       - name: Install the reviewed production zone publication
         if: inputs.publication_tag != ''
@@ -190,37 +112,11 @@ jobs:
           [[ "$PUBLICATION_SHA256" =~ ^[a-f0-9]{64}$ ]]
           test ! -e web/.generated
           dir=$(mktemp -d "$RUNNER_TEMP/publication.XXXXXX")
-          # 11-11 부터 묶음 이름은 <태그>.tar.gz, 11-08 이전 릴리스는 publication.tar.gz (scripts/deploy/publication-guard.mjs 와 같은 순서)
-          assets=$(gh release view "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
-          asset=""
-          for name in "$PUBLICATION_TAG.tar.gz" publication.tar.gz; do
-            if grep -Fxq "$name" <<<"$assets"; then asset=$name; break; fi
-          done
-          if [ -z "$asset" ]; then
-            echo "No publication archive in $PUBLICATION_TAG: tried $PUBLICATION_TAG.tar.gz, publication.tar.gz; release has: $(echo $assets)" >&2
-            exit 1
-          fi
-          gh release download "$PUBLICATION_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$dir"
-          [ "$asset" = publication.tar.gz ] || mv "$dir/$asset" "$dir/publication.tar.gz"
-          node -e '
-            const crypto = require("node:crypto");
-            const fs = require("node:fs");
-            const actual = crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex");
-            if (actual !== process.env.PUBLICATION_SHA256) {
-              console.error(`SHA-256 mismatch: expected ${process.env.PUBLICATION_SHA256}, got ${actual}`);
-              process.exit(1);
-            }
-          ' "$dir/publication.tar.gz"
-          tar -tzvf "$dir/publication.tar.gz" | awk '$1 !~ /^[-d]/ { bad=1 } END { exit bad }'
-          tar -tzf "$dir/publication.tar.gz" | grep -Ev '^(zone-documents\.json|home-moves\.json|zone-card-publications/|zone-card-publications/manifest\.json|zone-card-publications/[a-z0-9]+(-[a-z0-9]+)*\.json)$' && exit 1
+          trap 'rm -rf -- "$dir"' EXIT
+          node scripts/deploy/release-publication-download.mjs "$dir"
           mkdir -p web/.generated
           tar -xzf "$dir/publication.tar.gz" -C web/.generated --no-same-owner --no-same-permissions
           test ! -e web/.generated/ci-publication.json
-
-      - name: Require successful CI for this commit or its nearest code commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/deploy/control.mjs require-ci
 
       - name: Build clean linux amd64 web images
         run: |
@@ -240,42 +136,19 @@ jobs:
 
       - name: Verify isolated web runtime before publishing
         run: |
-          trap 'docker compose -f deploy/next-web/compose.yaml down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
-          docker compose -f deploy/next-web/compose.yaml up -d --wait --wait-timeout 150
-          NEXT_SMOKE_ORIGIN=http://127.0.0.1:18081 node scripts/next-web/smoke.mjs
+          smoke_port=$(bash scripts/ci/setup-mac-runner.sh allocate-port)
+          port_override="$RUNNER_TEMP/compose.port.yaml"
+          printf 'services:\n  proxy:\n    ports: !override ["127.0.0.1:%s:8080"]\n' "$smoke_port" > "$port_override"
+          trap 'docker compose -f deploy/next-web/compose.yaml -f "$port_override" down -v --remove-orphans >/dev/null 2>&1 || true; rm -f "$port_override"' EXIT
+          docker compose -f deploy/next-web/compose.yaml -f "$port_override" up -d --wait --wait-timeout 150
+          NEXT_SMOKE_ORIGIN="http://127.0.0.1:${smoke_port}" node scripts/next-web/smoke.mjs
           node scripts/next-web/ecr-release.mjs record "$RELEASE_DIR"
-          docker compose -f deploy/next-web/compose.yaml down -v --remove-orphans
+          docker compose -f deploy/next-web/compose.yaml -f "$port_override" down -v --remove-orphans
+          rm -f "$port_override"
           node scripts/next-web/origin-smoke.mjs
 
       - name: Scan local OS packages before AWS authentication
-        run: |
-          scanner_dir=$(mktemp -d "$RUNNER_TEMP/trivy.XXXXXX")
-          trap 'rm -rf -- "$scanner_dir"' EXIT
-          if [ "$(uname -s)" = "Darwin" ]; then
-            trivy_asset="trivy_0.76.0_macOS-ARM64.tar.gz"
-          else
-            trivy_asset="trivy_0.76.0_Linux-64bit.tar.gz"
-          fi
-          base_url="https://github.com/aquasecurity/trivy/releases/download/v0.76.0"
-          curl --fail --location --retry 3 --proto '=https' \
-            "${base_url}/${trivy_asset}" \
-            --output "$scanner_dir/$trivy_asset"
-          curl --fail --location --retry 3 --proto '=https' \
-            "${base_url}/trivy_0.76.0_checksums.txt" \
-            --output "$scanner_dir/checksums.txt"
-          node -e '
-            const crypto = require("node:crypto");
-            const fs = require("node:fs");
-            const [dir, asset] = process.argv.slice(1);
-            const sums = fs.readFileSync(`${dir}/checksums.txt`, "utf8").split("\n");
-            const line = sums.find((l) => l.endsWith(`  ${asset}`));
-            const expected = line ? line.split(/\s+/)[0] : "";
-            if (!/^[a-f0-9]{64}$/.test(expected)) throw Error("Checksum entry missing");
-            const actual = crypto.createHash("sha256").update(fs.readFileSync(`${dir}/${asset}`)).digest("hex");
-            if (actual !== expected) throw Error(`Trivy SHA-256 mismatch: ${actual} !== ${expected}`);
-          ' "$scanner_dir" "$trivy_asset"
-          tar -xzf "$scanner_dir/$trivy_asset" -C "$scanner_dir" trivy
-          TRIVY_BIN="$scanner_dir/trivy" node scripts/next-web/preflight-scan.mjs "$RELEASE_DIR"
+        run: node scripts/next-web/trivy-download.mjs "$RELEASE_DIR"
 
       - name: Authenticate for ECR upload
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -294,6 +167,12 @@ jobs:
 
       - name: Publish immutable image versions
         run: |
+          # 임시 DOCKER_CONFIG 에는 러너의 컨텍스트 정보가 없어 DOCKER_CONTEXT 를 못 찾는다(2026-11-16). 주소로 먼저 푼다
+          if [ -n "${DOCKER_CONTEXT:-}" ]; then
+            DOCKER_HOST=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')
+            export DOCKER_HOST
+            unset DOCKER_CONTEXT
+          fi
           export DOCKER_CONFIG
           DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/ecr-login.XXXXXX")
           trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
@@ -316,5 +195,6 @@ jobs:
         if: always()
         run: |
           if test -f deploy/next-web/compose.yaml; then
-            docker compose -f deploy/next-web/compose.yaml down -v
+            docker compose -f deploy/next-web/compose.yaml down -v >/dev/null 2>&1 || true
           fi
+          docker rmi -f "$JAEVIEW_WEB_IMAGE" "$JAEVIEW_PROXY_IMAGE" >/dev/null 2>&1 || true

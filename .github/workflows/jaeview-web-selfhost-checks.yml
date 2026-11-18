@@ -1,4 +1,7 @@
 name: Self-hosted migration checks (Mac mini)
+# The PR command handler uses the manual full run name to identify reusable active runs.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && (inputs.full && 'Manual full validation' || 'Manual quick validation') || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
 on:
   workflow_call:
     inputs:
@@ -21,13 +24,13 @@ concurrency:
   group: selfhost-checks-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  verify:
+  scope:
     if: github.repository == 'jaeview/jaeview-web'
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 40
-    env:
-      JAEVIEW_DOCKER_CONTEXT: default
-      JAEVIEW_SCHEMA_API_PLATFORM: linux/arm64
+    timeout-minutes: 10
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+      full: ${{ steps.scope.outputs.full }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -36,205 +39,68 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .node-version
+      - name: Configure Mac runner environment
+        run: bash scripts/ci/setup-mac-runner.sh setup ci no-docker
       - name: Select validation scope
         id: scope
         run: node scripts/ci/scope.mjs
       - name: Check CI scope policy
         run: node --test scripts/ci/scope.test.mjs
-      - name: Exact integration candidate inputs
-        run: node scripts/migration/check-integration-candidate.mjs
-      - name: Configure Mac mini self-hosted runner workspace and Docker context
-        if: steps.scope.outputs.code == 'true'
+      - name: Integration candidate check (PR and /check full use --pr; main/develop/queue enforce strict pin)
         run: |
-          if [ "${GITHUB_ACTIONS:-}" = true ]; then
-            rm -rf web/.generated
-          fi
-          rm -rf web/.next
-          if [ "$(uname -s)" = "Darwin" ]; then
-            export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-            printf 'PATH=/opt/homebrew/bin:/usr/local/bin:%s/.local/bin:%s\n' "$HOME" "$PATH" >> "$GITHUB_ENV"
-            ci_tmp_root="$HOME/.cache/jaeview-ci-tmp"
-            find "$ci_tmp_root" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf -- {} + 2>/dev/null || true
-            ci_tmp="$ci_tmp_root/${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
-            mkdir -p "$ci_tmp"
-            chmod 700 "$ci_tmp"
-            printf 'TMPDIR=%s\nORIGIN_CHECK_TMP_ROOT=%s\n' "$ci_tmp" "$ci_tmp" >> "$GITHUB_ENV"
-            selected_ctx=""
-            explicit_ctx="${DOCKER_CONTEXT:-}"
-            if [ "$explicit_ctx" = "default" ]; then
-              explicit_ctx=""
-            fi
-            for candidate in "${JAEVIEW_RELEASE_DOCKER_CONTEXT:-}" "$explicit_ctx" colima-jaeview-release; do
-              if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
-                continue
-              fi
-              if docker --context "$candidate" info >/dev/null 2>&1; then
-                selected_ctx="$candidate"
-                break
-              fi
-            done
-            if [ -z "$selected_ctx" ] && command -v colima >/dev/null 2>&1; then
-              prev_ctx=$(docker context show 2>/dev/null || true)
-              if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "jaeview-release"; then
-                colima start --profile jaeview-release
-              else
-                mem_gb=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
-                vm_mem=$(( mem_gb >= 24 ? 12 : (mem_gb >= 16 ? 8 : 6) ))
-                if /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
-                  colima start --profile jaeview-release --arch aarch64 --vm-type vz --vz-rosetta --cpu 4 --memory "$vm_mem" --disk 60 --mount "$HOME:w"
-                else
-                  colima start --profile jaeview-release --arch aarch64 --vm-type vz --cpu 4 --memory "$vm_mem" --disk 60 --mount "$HOME:w"
-                fi
-              fi
-              if [ -n "$prev_ctx" ]; then
-                docker context use "$prev_ctx" >/dev/null 2>&1 || true
-              fi
-              if docker --context colima-jaeview-release info >/dev/null 2>&1; then
-                selected_ctx="colima-jaeview-release"
-              fi
-            fi
-            if [ "$selected_ctx" = "colima-jaeview-release" ] && command -v colima >/dev/null 2>&1; then
-              driver_status=$(docker --context colima-jaeview-release info --format '{{json .DriverStatus}}' 2>/dev/null || true)
-              colima_cfg="$HOME/.colima/jaeview-release/colima.yaml"
-              case "$driver_status" in
-                *io.containerd.snapshotter*)
-                  if [ -f "$colima_cfg" ]; then
-                    node -e 'const fs=require("node:fs"),p=process.argv[1];let s=fs.readFileSync(p,"utf8");if(/^docker:\s*\{\}\s*$/m.test(s)){s=s.replace(/^docker:\s*\{\}\s*$/m,"docker:\n  features:\n    containerd-snapshotter: false");}else if(/^\s*containerd-snapshotter:\s*true\b/m.test(s)){s=s.replace(/^(\s*containerd-snapshotter:\s*)true\b/m,"$1false");}else if(/^docker:\s*\n  features:\s*$/m.test(s)){s=s.replace(/^(docker:\s*\n  features:\s*)$/m,"$1\n    containerd-snapshotter: false");}else if(/^docker:\s*$/m.test(s)){s=s.replace(/^docker:\s*$/m,"docker:\n  features:\n    containerd-snapshotter: false");}else if(!/containerd-snapshotter:\s*false\b/.test(s)){s=s.trimEnd()+"\ndocker:\n  features:\n    containerd-snapshotter: false\n";}fs.writeFileSync(p,s);' "$colima_cfg"
-                    prev_ctx=$(docker context show 2>/dev/null || true)
-                    colima restart --profile jaeview-release
-                    if [ -n "$prev_ctx" ]; then
-                      docker context use "$prev_ctx" >/dev/null 2>&1 || true
-                    fi
-                  fi
-                  ;;
-              esac
-            fi
-            if [ -z "$selected_ctx" ]; then
-              for candidate in "$(docker context show 2>/dev/null || true)" default orbstack desktop-linux colima; do
-                if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
-                  continue
-                fi
-                if docker --context "$candidate" info >/dev/null 2>&1; then
-                  selected_ctx="$candidate"
-                  break
-                fi
-              done
-            fi
-            if [ -z "$selected_ctx" ] || [ "$selected_ctx" = "colima-jaeview" ]; then
-              echo "::error::No usable non-protected Docker context is running on the Mac mini runner"
-              exit 1
-            fi
-            if [ "${GITHUB_ACTIONS:-}" = true ]; then
-              for cname in $(docker --context "$selected_ctx" ps -a --format '{{.Names}}\t{{.Status}}' | awk -F'\t' '$2 ~ /^(Exited|Created|Dead)/ {print $1}' | grep -E '^jaeview-(rehearsal|origin-check|ops-pg|api-smoke|schema-(api-)?test)-' || true); do
-                docker --context "$selected_ctx" rm -f "$cname" >/dev/null 2>&1 || true
-              done
-              for net in $(docker --context "$selected_ctx" network ls --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-' || true); do
-                docker --context "$selected_ctx" network rm "$net" >/dev/null 2>&1 || true
-              done
-              for vol in $(docker --context "$selected_ctx" volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-|^jaeview-web-next-isr-local$' || true); do
-                docker --context "$selected_ctx" volume rm "$vol" >/dev/null 2>&1 || true
-              done
-              for img in $(docker --context "$selected_ctx" image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^jaeview-(api|web|next):jaeview-rehearsal-' || true); do
-                docker --context "$selected_ctx" rmi -f "$img" >/dev/null 2>&1 || true
-              done
-              docker --context "$selected_ctx" builder prune --keep-storage 12GB --force >/dev/null 2>&1 || docker --context "$selected_ctx" builder prune --filter 'until=24h' --force >/dev/null 2>&1 || true
-              free_kib=""
-              case "$selected_ctx" in
-                colima-*)
-                  free_kib=$(colima ssh --profile "${selected_ctx#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
-                  ;;
-                *)
-                  docker_root=$(docker --context "$selected_ctx" info --format '{{.DockerRootDir}}' 2>/dev/null || true)
-                  if [ -n "$docker_root" ] && [ -d "$docker_root" ]; then
-                    free_kib=$(df -Pk "$docker_root" 2>/dev/null | awk 'NR==2 {print $4}' || true)
-                  fi
-                  ;;
-              esac
-              if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
-                docker --context "$selected_ctx" builder prune --all --force >/dev/null 2>&1 || true
-                docker --context "$selected_ctx" image prune --all --force >/dev/null 2>&1 || true
-              fi
-              if [ "${selected_ctx#colima-}" != "$selected_ctx" ]; then
-                colima ssh --profile "${selected_ctx#colima-}" -- df -h /var/lib/docker || true
-              fi
-              docker --context "$selected_ctx" system df || true
-            fi
-            printf 'JAEVIEW_DOCKER_CONTEXT=%s\nDOCKER_CONTEXT=%s\n' "$selected_ctx" "$selected_ctx" >> "$GITHUB_ENV"
-          fi
-      - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
-        if: steps.scope.outputs.code == 'true'
-      - name: Install locked dependencies
-        if: steps.scope.outputs.code == 'true'
-        run: |
-          pnpm install --frozen-lockfile
-      - name: Install locked data-analysis MCP dependencies
-        if: steps.scope.outputs.code == 'true'
-        run: npm --prefix .agents/skills/data-analysis/scripts ci --ignore-scripts --no-audit --no-fund
-      - name: Install pinned Chromium and browser test environment
-        if: steps.scope.outputs.code == 'true'
-        run: |
-          if [ "$(uname -s)" = "Darwin" ]; then
-            pnpm exec playwright install chromium
+          if [[ "${{ github.ref }}" == refs/heads/main || "${{ github.ref }}" == refs/heads/develop || "${{ github.ref }}" == refs/heads/_mq/* ]]; then
+            node scripts/migration/check-integration-candidate.mjs
           else
-            pnpm exec playwright install --with-deps chromium
+            node scripts/migration/check-integration-candidate.mjs --pr
           fi
-          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
-          import { fileURLToPath } from 'node:url';
-          import { chromium } from 'playwright';
-          console.log(`PLAYWRIGHT_MODULE=${fileURLToPath(import.meta.resolve('playwright'))}`);
-          console.log(`CHROME_PATH=${chromium.executablePath()}`);
-          NODE
+
+  static-unit:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Configure Mac runner environment
+        run: bash scripts/ci/setup-mac-runner.sh setup ci no-docker
+      - name: Install pinned pnpm for this job
+        run: |
+          pnpm_prefix=$(mktemp -d "$RUNNER_TEMP/jaeview-pnpm.XXXXXX")
+          npm install --global --prefix "$pnpm_prefix" pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+          printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install locked data-analysis MCP dependencies
+        run: npm --prefix .agents/skills/data-analysis/scripts ci --ignore-scripts --no-audit --no-fund
       - name: Check changed code and formatting
-        if: steps.scope.outputs.code == 'true'
         env:
           CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           base="$CHANGE_BASE"
           if [[ ! "$base" =~ ^[a-f0-9]{40}$ || "$base" =~ ^0+$ ]]; then
-            base=$(git rev-parse HEAD^)
+            base=$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse HEAD^)
           fi
           export QUALITY_BASE_SHA="$base"
           pnpm run test:quality
-          node --test scripts/checks/next-only-policy.test.mjs
+          node --test scripts/checks/next-only-policy.test.mjs scripts/ci/setup-mac-runner.test.mjs
           pnpm run lint:changed
           pnpm run format:check
       - name: Restore verified public publication for CI only
-        if: steps.scope.outputs.code == 'true'
         env:
           REGISTRY_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node --test scripts/ci/prepare-publication.test.mjs
           if [ "${GITHUB_ACTIONS:-}" = true ]; then
-            printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-            trap 'docker logout ghcr.io' EXIT
             node scripts/ci/prepare-publication.mjs
           fi
-      - name: Check stage corrections and Next production runtime
-        if: steps.scope.outputs.code == 'true'
-        run: |
-          node scripts/checks/check-zone-safety.mjs
-          node scripts/run-test.mjs web/tests/zones/test-stage-date-cache.mts
-          pnpm run build
-          pnpm run typecheck:next
-          lsof -ti tcp:18082 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
-          set -m
-          pnpm run start > /tmp/jaeview-next.log 2>&1 &
-          next_pid=$!
-          set +m
-          trap 'kill -- -"$next_pid" 2>/dev/null || true; lsof -ti tcp:18082 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true' EXIT
-          ready=0
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18082/healthz > /dev/null; then ready=1; break; fi
-            sleep 1
-          done
-          test "$ready" = 1
-          node scripts/next-web/smoke.mjs || node scripts/next-web/smoke.mjs
-          NEXT_SMOKE_PORT=18082 node scripts/run-test.mjs web/tests/browser/test-static-public-pages.mjs
-          node scripts/run-test.mjs web/tests/browser/test-simulator-insights-browser.mjs
-          node scripts/run-test.mjs web/tests/browser/test-trade-analytics-browser.mjs
-      - name: Check web, API and operations types
-        if: steps.scope.outputs.code == 'true'
+      - name: Check web, API and operations types and unit suites
         run: |
           pnpm run typecheck:all
           pnpm --filter @jaeview/api test
@@ -285,57 +151,12 @@ jobs:
           node scripts/run-test.mjs server/tests/self-test-calculation.ts
           pnpm --dir server exec tsc -p poc/agentcore/tsconfig.json
           node --import tsx --test server/poc/agentcore/test.ts
-      - name: Fresh SQL, narrow permissions, API and OAuth recovery
-        if: steps.scope.outputs.full == 'true'
-        run: |
-          node --test server/tests/init-independent-db.test.mjs
-          bash server/tests/fresh-schema.sh
-      - name: Reclaim completed host build and unused image caches
-        if: steps.scope.outputs.full == 'true'
-        run: |
-          if [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
-            df -h .
-            du -sh web/.next
-            rm -rf web/.next
-            docker builder prune --all --force
-            docker image prune --all --force
-            df -h .
-          elif [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${DOCKER_CONTEXT:-}" ] && [ "${DOCKER_CONTEXT:-}" != "colima-jaeview" ]; then
-            free_kib=""
-            case "$DOCKER_CONTEXT" in
-              colima-*)
-                free_kib=$(colima ssh --profile "${DOCKER_CONTEXT#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
-                ;;
-            esac
-            if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
-              for img in $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^jaeview-(api|web|next):jaeview-rehearsal-' || true); do
-                docker rmi -f "$img" >/dev/null 2>&1 || true
-              done
-              for vol in $(docker volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-|^jaeview-web-next-isr-local$' || true); do
-                docker volume rm "$vol" >/dev/null 2>&1 || true
-              done
-              docker builder prune --all --force >/dev/null 2>&1 || true
-              docker image prune --all --force >/dev/null 2>&1 || true
-            fi
-          fi
-      - name: Full local Next, proxy, API and database deployment rehearsal
-        if: steps.scope.outputs.full == 'true'
-        run: |
-          compose_bin="${RUNNER_TEMP:-/tmp}/jaeview-compose-$$"
-          trap 'rm -f "$compose_bin"' EXIT
-          cat > "$compose_bin" <<'SH'
-          #!/bin/sh
-          exec docker compose "$@"
-          SH
-          chmod +x "$compose_bin"
-          JAEVIEW_COMPOSE_BIN="$compose_bin" JAEVIEW_STACK_BUILD_ID=ci-${{ github.sha }} JAEVIEW_STACK_REVISION=${{ github.sha }} node server/scripts/test-selfhost-stack.mjs --run
       - name: Check independent runtime and client behavior
-        if: steps.scope.outputs.code == 'true'
         run: |
           node --test scripts/deploy/control.test.mjs
           node --test deploy/remote/*.test.mts scripts/deploy/*.test.mts
-          node --test scripts/deploy/publication-stage-regression.test.mjs scripts/deploy/stage-smoke.test.mjs scripts/deploy/publication-guard.test.mjs scripts/deploy/publication-guard-archive.test.mjs
-          pnpm run typecheck:deploy
+          node --test scripts/deploy/publication-stage-regression.test.mjs scripts/deploy/stage-smoke.test.mjs scripts/deploy/publication-guard.test.mjs scripts/deploy/publication-guard-archive.test.mjs scripts/deploy/publication-health.test.mjs
+          node --test scripts/ci/merge-queue.test.mjs
           pnpm run test:independence
           node tests/platform/test-independence-policy.mjs
           node scripts/migration/test-schema-manifest.mjs
@@ -368,80 +189,218 @@ jobs:
           node --import tsx server/tests/backup-envelope.ts
           node --import tsx server/tests/checkpoint-backup.ts
           node --import tsx server/tests/nonres-csv.ts
-          node --import tsx server/tests/domain-reference-integrity.ts
-          node --import tsx server/tests/auth-source-validation.ts
-          node --import tsx server/tests/collector-source-validation.ts
-          node --import tsx server/tests/member-route-inputs.ts
-          node scripts/run-test.mjs web/tests/auth/test-member-session.mts
-          node scripts/run-test.mjs web/tests/auth/test-member-logout.mts
-          node scripts/run-test.mjs web/tests/auth/test-two-sessions.mts
-          node scripts/run-test.mjs web/tests/notices/test-press-pdf-public.mts
-          node scripts/run-test.mjs web/tests/zones/test-zone-market-prices.mts
-          node scripts/run-test.mjs web/tests/zones/test-zone-read-pages.mts
-          node scripts/run-test.mjs web/tests/ai/test-ai-error-messages.mts
-          node scripts/run-test.mjs web/tests/zones/test-zone-card-trades.mts
-          node scripts/run-test.mjs web/tests/zones/test-zone-overview-trades.mts
-          node scripts/run-test.mjs web/tests/trades/test-spatial-parcels.mts
-          node scripts/run-test.mjs web/tests/platform/test-batch21-source-screens.mts
-          node scripts/run-test.mjs web/tests/trades/test-housing-price-browser.mts
-          node scripts/run-test.mjs web/tests/platform/test-date-only.mts
-          node scripts/run-test.mjs web/tests/platform/test-self-destroying-sw.mjs
-          node scripts/run-test.mjs web/tests/platform/test-api-error-message.mts
-          node scripts/run-test.mjs web/tests/platform/test-zone-center.mts
-          node scripts/run-test.mjs web/tests/notices/test-district-notices.mts
-          node scripts/next-web/test-cloudfront-viewer-request.mjs
-          node scripts/next-web/test-public-build-env.mjs
-          node scripts/next-web/test-robots-policy.mjs
-          node scripts/next-web/test-url-hardening.mjs
-          node scripts/next-web/test-internal-public-api.mjs
-          node scripts/run-test.mjs web/tests/auth/test-kakao-client.mts
-          node scripts/run-test.mjs web/tests/zones/test-zone-reference-address.mts
-          node scripts/run-test.mjs tests/trades/test-trade-risk.mts
+      - name: Clean generated workspace artifacts
+        if: always()
+        run: rm -rf web/.generated web/.next
+
+  next-playwright:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Configure Mac runner environment
+        run: bash scripts/ci/setup-mac-runner.sh setup ci no-docker
+      - name: Install pinned pnpm for this job
+        run: |
+          pnpm_prefix=$(mktemp -d "$RUNNER_TEMP/jaeview-pnpm.XXXXXX")
+          npm install --global --prefix "$pnpm_prefix" pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+          printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install pinned Chromium and browser test environment
+        run: |
+          if [ "$(uname -s)" = "Darwin" ]; then
+            pnpm exec playwright install chromium
+          else
+            pnpm exec playwright install --with-deps chromium
+          fi
+          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
+          import { fileURLToPath } from 'node:url';
+          import { chromium } from 'playwright';
+          console.log(`PLAYWRIGHT_MODULE=${fileURLToPath(import.meta.resolve('playwright'))}`);
+          console.log(`CHROME_PATH=${chromium.executablePath()}`);
+          NODE
+      - name: Restore verified public publication for CI only
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/prepare-publication.mjs
+      - name: Check stage corrections and build Next production output
+        env:
+          JAEVIEW_CI_NEXT_WORKERS: '4'
+        run: |
+          node scripts/checks/check-zone-safety.mjs
+          node scripts/run-test.mjs web/tests/zones/test-stage-date-cache.mts
+          pnpm run build
+      - name: Check Next production runtime
+        run: |
+          next_port=$(bash scripts/ci/setup-mac-runner.sh allocate-port)
+          next_log="$RUNNER_TEMP/jaeview-next-$next_port.log"
+          set -m
+          JAEVIEW_WEB_PORT="$next_port" pnpm run start > "$next_log" 2>&1 &
+          next_pid=$!
+          set +m
+          trap 'kill -- -"$next_pid" 2>/dev/null || kill "$next_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent "http://127.0.0.1:${next_port}/healthz" > /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          NEXT_SMOKE_PORT="$next_port" node scripts/next-web/smoke.mjs || NEXT_SMOKE_PORT="$next_port" node scripts/next-web/smoke.mjs
+          NEXT_SMOKE_PORT="$next_port" node scripts/run-test.mjs web/tests/browser/test-static-public-pages.mjs
+          node scripts/run-test.mjs web/tests/browser/test-simulator-insights-browser.mjs
+          node scripts/run-test.mjs web/tests/browser/test-trade-analytics-browser.mjs
+      - name: Clean Next build caches
+        if: always()
+        run: rm -rf web/.generated web/.next
+
+  contracts:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Configure Mac runner environment
+        run: bash scripts/ci/setup-mac-runner.sh setup ci no-docker
+      - name: Install pinned pnpm for this job
+        run: |
+          pnpm_prefix=$(mktemp -d "$RUNNER_TEMP/jaeview-pnpm.XXXXXX")
+          npm install --global --prefix "$pnpm_prefix" pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+          printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install locked data-analysis MCP dependencies
+        run: npm --prefix .agents/skills/data-analysis/scripts ci --ignore-scripts --no-audit --no-fund
+      - name: Restore verified public publication for CI only
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/prepare-publication.mjs
       - name: Compare offline matching with the pre-refactor corpus
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         run: PYTHONDONTWRITEBYTECODE=1 python3 tests/data/test_offline_pipelines.py --full-corpus
       - name: Complete client and native contract regressions
-        if: steps.scope.outputs.code == 'true'
+        env:
+          JAEVIEW_TEST_CONCURRENCY: '4'
         run: pnpm test
-      - name: Reclaim completed rehearsal image caches
-        if: steps.scope.outputs.full == 'true'
+      - name: Clean generated workspace artifacts
+        if: always()
+        run: rm -rf web/.generated
+
+  docker-verify:
+    needs: scope
+    if: needs.scope.outputs.full == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [fresh-sql, stack-rehearsal, prod-containers]
+    env:
+      JAEVIEW_SCHEMA_API_PLATFORM: linux/arm64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          clean: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Configure Mac runner and Docker context
+        run: bash scripts/ci/setup-mac-runner.sh setup ci docker
+      - name: Restore verified public publication for CI only
+        if: matrix.task != 'fresh-sql'
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/prepare-publication.mjs
+      - name: Prepare verified Next Docker inputs
+        if: matrix.task != 'fresh-sql'
+        id: next-context
         run: |
-          if [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ]; then
-            docker builder prune --all --force
-            docker image prune --all --force
-            df -h .
-          elif [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${DOCKER_CONTEXT:-}" ] && [ "${DOCKER_CONTEXT:-}" != "colima-jaeview" ]; then
-            for img in $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E '^jaeview-(api|web|next):jaeview-rehearsal-' || true); do
-              docker rmi -f "$img" >/dev/null 2>&1 || true
-            done
-            for vol in $(docker volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-' || true); do
-              docker volume rm "$vol" >/dev/null 2>&1 || true
-            done
-            docker builder prune --keep-storage 12GB --force >/dev/null 2>&1 || docker builder prune --filter 'until=24h' --force >/dev/null 2>&1 || true
-            free_kib=""
-            case "$DOCKER_CONTEXT" in
-              colima-*)
-                free_kib=$(colima ssh --profile "${DOCKER_CONTEXT#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
-                ;;
-            esac
-            if [ -n "$free_kib" ] && [ "$free_kib" -lt 15728640 ] 2>/dev/null; then
-              docker builder prune --all --force >/dev/null 2>&1 || true
-              docker image prune --all --force >/dev/null 2>&1 || true
-            fi
-          fi
+          context_record=$(node scripts/next-web/prepare-context.mjs --ci-validation)
+          node -e 'const {context, buildId} = JSON.parse(process.argv[1]); console.log(`context=${context}\nbuild_id=${buildId}`)' "$context_record" >> "$GITHUB_OUTPUT"
+      - name: Fresh SQL, narrow permissions, API and OAuth recovery
+        if: matrix.task == 'fresh-sql'
+        run: |
+          slot=$(bash scripts/ci/setup-mac-runner.sh docker-slot acquire fresh-sql)
+          trap 'bash scripts/ci/setup-mac-runner.sh docker-slot release "$slot"' EXIT
+          node --test server/tests/init-independent-db.test.mjs
+          JAEVIEW_SCHEMA_API_IMAGE="jaeview-schema-api:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+          JAEVIEW_SCHEMA_CLEAN_IMAGE=1 \
+            bash server/tests/fresh-schema.sh
+      - name: Full local Next, proxy, API and database deployment rehearsal
+        if: matrix.task == 'stack-rehearsal'
+        env:
+          JAEVIEW_STACK_NEXT_CONTEXT: ${{ steps.next-context.outputs.context }}
+          JAEVIEW_STACK_BUILD_ID: ${{ steps.next-context.outputs.build_id }}
+        run: |
+          slot=$(bash scripts/ci/setup-mac-runner.sh docker-slot acquire)
+          compose_bin="${RUNNER_TEMP:-/tmp}/jaeview-compose-$$"
+          trap 'rm -f "$compose_bin"; bash scripts/ci/setup-mac-runner.sh docker-slot release "$slot"' EXIT
+          cat > "$compose_bin" <<'SH'
+          #!/bin/sh
+          exec docker compose "$@"
+          SH
+          chmod +x "$compose_bin"
+          JAEVIEW_COMPOSE_BIN="$compose_bin" \
+          JAEVIEW_STACK_REVISION="${{ github.sha }}" \
+            node server/scripts/test-selfhost-stack.mjs --run
       - name: Build and verify production web and proxy containers
-        if: steps.scope.outputs.full == 'true'
+        if: matrix.task == 'prod-containers'
+        env:
+          NEXT_BUILD_CONTEXT: ${{ steps.next-context.outputs.context }}
+          WEB_BUILD_ID: ${{ steps.next-context.outputs.build_id }}
         run: |
+          slot=$(bash scripts/ci/setup-mac-runner.sh docker-slot acquire)
+          web_tag="jaeview-ci-web:${{ github.run_id }}-${{ github.run_attempt }}"
+          proxy_tag="jaeview-ci-proxy:${{ github.run_id }}-${{ github.run_attempt }}"
+          cleanup() {
+            docker rmi -f "$web_tag" "$proxy_tag" >/dev/null 2>&1 || true
+            bash scripts/ci/setup-mac-runner.sh docker-slot release "$slot"
+          }
+          trap cleanup EXIT
           node --test scripts/next-web/prepare-context.test.mjs
-          next_ctx_file="${RUNNER_TEMP:-/tmp}/next-context-$$.json"
-          context=""
-          trap 'rm -rf "$context" "$next_ctx_file"' EXIT
-          if [ "${GITHUB_ACTIONS:-}" = true ]; then
-            node scripts/next-web/prepare-context.mjs --ci-validation > "$next_ctx_file"
-          else
-            node scripts/next-web/prepare-context.mjs > "$next_ctx_file"
+          node scripts/next-web/test-web-unavailable.mjs
+          docker build --platform linux/amd64 --build-arg "WEB_BUILD_ID=$WEB_BUILD_ID" --build-arg "SOURCE_REVISION=$GITHUB_SHA" -f "$NEXT_BUILD_CONTEXT/deploy/next-web/Dockerfile" -t "$web_tag" "$NEXT_BUILD_CONTEXT"
+          docker build --platform linux/amd64 -f deploy/next-web/proxy.Dockerfile -t "$proxy_tag" deploy/next-web
+          JAEVIEW_WEB_IMAGE="$web_tag" JAEVIEW_PROXY_IMAGE="$proxy_tag" node scripts/next-web/origin-smoke.mjs
+      - name: Clean generated workspace artifacts
+        if: always()
+        env:
+          NEXT_BUILD_CONTEXT: ${{ steps.next-context.outputs.context }}
+        run: |
+          rm -rf web/.generated web/.next .local-migration/selfhost-tests
+          if [ -n "$NEXT_BUILD_CONTEXT" ]; then rm -rf "$NEXT_BUILD_CONTEXT"; fi
+
+  verify:
+    needs: [scope, static-unit, next-playwright, contracts, docker-verify]
+    if: always()
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 5
+    steps:
+      - name: Confirm required parallel CI results
+        run: |
+          test "${{ needs.scope.result }}" = "success"
+          if [ "${{ needs.scope.outputs.code }}" = "true" ]; then
+            test "${{ needs.static-unit.result }}" = "success"
+            test "${{ needs.next-playwright.result }}" = "success"
+            test "${{ needs.contracts.result }}" = "success"
           fi
-          context=$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1])).context" "$next_ctx_file")
-          docker build --platform linux/amd64 --build-arg WEB_BUILD_ID=ci-${{ github.sha }} --build-arg SOURCE_REVISION=${{ github.sha }} -f "$context/deploy/next-web/Dockerfile" -t jaeview-ci-web "$context"
-          docker build --platform linux/amd64 -f deploy/next-web/proxy.Dockerfile -t jaeview-ci-proxy deploy/next-web
-          JAEVIEW_WEB_IMAGE=jaeview-ci-web JAEVIEW_PROXY_IMAGE=jaeview-ci-proxy node scripts/next-web/origin-smoke.mjs
+          if [ "${{ needs.scope.outputs.full }}" = "true" ]; then
+            test "${{ needs.docker-verify.result }}" = "success"
+          fi

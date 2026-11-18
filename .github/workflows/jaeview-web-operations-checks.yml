@@ -10,7 +10,7 @@ concurrency:
 jobs:
   verify:
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 10
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -19,106 +19,24 @@ jobs:
         with:
           node-version-file: .node-version
       - name: Select safe Docker context on Mac mini
+        run: bash scripts/ci/setup-mac-runner.sh setup ci docker
+      - name: Install pinned pnpm for this job
         run: |
-          if [ "$(uname -s)" = "Darwin" ]; then
-            export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-            printf 'PATH=/opt/homebrew/bin:/usr/local/bin:%s/.local/bin:%s\n' "$HOME" "$PATH" >> "$GITHUB_ENV"
-            selected_ctx=""
-            explicit_ctx="${DOCKER_CONTEXT:-}"
-            if [ "$explicit_ctx" = "default" ]; then
-              explicit_ctx=""
-            fi
-            for candidate in "${JAEVIEW_RELEASE_DOCKER_CONTEXT:-}" "$explicit_ctx" colima-jaeview-release; do
-              if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
-                continue
-              fi
-              if docker --context "$candidate" info >/dev/null 2>&1; then
-                selected_ctx="$candidate"
-                break
-              fi
-            done
-            if [ -z "$selected_ctx" ] && command -v colima >/dev/null 2>&1; then
-              prev_ctx=$(docker context show 2>/dev/null || true)
-              if colima list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "jaeview-release"; then
-                colima start --profile jaeview-release
-              else
-                mem_gb=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
-                vm_mem=$(( mem_gb >= 24 ? 12 : (mem_gb >= 16 ? 8 : 6) ))
-                if /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
-                  colima start --profile jaeview-release --arch aarch64 --vm-type vz --vz-rosetta --cpu 4 --memory "$vm_mem" --disk 60 --mount "$HOME:w"
-                else
-                  colima start --profile jaeview-release --arch aarch64 --vm-type vz --cpu 4 --memory "$vm_mem" --disk 60 --mount "$HOME:w"
-                fi
-              fi
-              if [ -n "$prev_ctx" ]; then
-                docker context use "$prev_ctx" >/dev/null 2>&1 || true
-              fi
-              if docker --context colima-jaeview-release info >/dev/null 2>&1; then
-                selected_ctx="colima-jaeview-release"
-              fi
-            fi
-            if [ "$selected_ctx" = "colima-jaeview-release" ] && command -v colima >/dev/null 2>&1; then
-              driver_status=$(docker --context colima-jaeview-release info --format '{{json .DriverStatus}}' 2>/dev/null || true)
-              colima_cfg="$HOME/.colima/jaeview-release/colima.yaml"
-              case "$driver_status" in
-                *io.containerd.snapshotter*)
-                  if [ -f "$colima_cfg" ]; then
-                    node -e 'const fs=require("node:fs"),p=process.argv[1];let s=fs.readFileSync(p,"utf8");if(/^docker:\s*\{\}\s*$/m.test(s)){s=s.replace(/^docker:\s*\{\}\s*$/m,"docker:\n  features:\n    containerd-snapshotter: false");}else if(/^\s*containerd-snapshotter:\s*true\b/m.test(s)){s=s.replace(/^(\s*containerd-snapshotter:\s*)true\b/m,"$1false");}else if(/^docker:\s*\n  features:\s*$/m.test(s)){s=s.replace(/^(docker:\s*\n  features:\s*)$/m,"$1\n    containerd-snapshotter: false");}else if(/^docker:\s*$/m.test(s)){s=s.replace(/^docker:\s*$/m,"docker:\n  features:\n    containerd-snapshotter: false");}else if(!/containerd-snapshotter:\s*false\b/.test(s)){s=s.trimEnd()+"\ndocker:\n  features:\n    containerd-snapshotter: false\n";}fs.writeFileSync(p,s);' "$colima_cfg"
-                    prev_ctx=$(docker context show 2>/dev/null || true)
-                    colima restart --profile jaeview-release
-                    if [ -n "$prev_ctx" ]; then
-                      docker context use "$prev_ctx" >/dev/null 2>&1 || true
-                    fi
-                  fi
-                  ;;
-              esac
-            fi
-            if [ -z "$selected_ctx" ]; then
-              for candidate in "$(docker context show 2>/dev/null || true)" default orbstack desktop-linux colima; do
-                if [ -z "$candidate" ] || [ "$candidate" = "colima-jaeview" ]; then
-                  continue
-                fi
-                if docker --context "$candidate" info >/dev/null 2>&1; then
-                  selected_ctx="$candidate"
-                  break
-                fi
-              done
-            fi
-            if [ -z "$selected_ctx" ] || [ "$selected_ctx" = "colima-jaeview" ]; then
-              echo "::error::No usable non-protected Docker context is running on the Mac mini runner"
-              exit 1
-            fi
-            if [ "${GITHUB_ACTIONS:-}" = true ]; then
-              for cname in $(docker --context "$selected_ctx" ps -a --format '{{.Names}}\t{{.Status}}' | awk -F'\t' '$2 ~ /^(Exited|Created|Dead)/ {print $1}' | grep -E '^jaeview-(rehearsal|origin-check|ops-pg|api-smoke|schema-(api-)?test)-' || true); do
-                docker --context "$selected_ctx" rm -f "$cname" >/dev/null 2>&1 || true
-              done
-              for net in $(docker --context "$selected_ctx" network ls --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-' || true); do
-                docker --context "$selected_ctx" network rm "$net" >/dev/null 2>&1 || true
-              done
-              for vol in $(docker --context "$selected_ctx" volume ls --filter dangling=true --format '{{.Name}}' | grep -E '^jaeview-(rehearsal|origin-check)-|^jaeview-web-next-isr-local$' || true); do
-                docker --context "$selected_ctx" volume rm "$vol" >/dev/null 2>&1 || true
-              done
-              free_kib=""
-              case "$selected_ctx" in
-                colima-*)
-                  free_kib=$(colima ssh --profile "${selected_ctx#colima-}" -- df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || true)
-                  ;;
-              esac
-              if [ -n "$free_kib" ] && [ "$free_kib" -lt 20971520 ] 2>/dev/null; then
-                docker --context "$selected_ctx" builder prune --all --force >/dev/null 2>&1 || true
-                docker --context "$selected_ctx" image prune --all --force >/dev/null 2>&1 || true
-              fi
-            fi
-            printf 'DOCKER_CONTEXT=%s\n' "$selected_ctx" >> "$GITHUB_ENV"
-          fi
-      - run: npm install --global pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+          pnpm_prefix=$(mktemp -d "$RUNNER_TEMP/jaeview-pnpm.XXXXXX")
+          npm install --global --prefix "$pnpm_prefix" pnpm@12.15.0 --ignore-scripts --no-audit --no-fund
+          printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
       - run: pnpm --filter jaeview-operations-runtime install --frozen-lockfile --ignore-scripts
       - run: pnpm --dir deploy/operations typecheck
       - name: Run operations tests with isolated Postgres 17 container
         run: |
           # macOS self-hosted runner에서는 GitHub Actions `services:` 컨테이너 대신 격리된 임시 컨테이너를 띄운다.
           pg_container="jaeview-ops-pg-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-$$"
-          trap 'docker rm -f "$pg_container" >/dev/null 2>&1 || true' EXIT
+          slot=$(bash scripts/ci/setup-mac-runner.sh docker-slot acquire)
+          cleanup() {
+            docker rm -f "$pg_container" >/dev/null 2>&1 || true
+            bash scripts/ci/setup-mac-runner.sh docker-slot release "$slot"
+          }
+          trap cleanup EXIT
           docker run -d --name "$pg_container" \
             -e POSTGRES_PASSWORD=ops-test-only \
             -e POSTGRES_DB=ops_test \

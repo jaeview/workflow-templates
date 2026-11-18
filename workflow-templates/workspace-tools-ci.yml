@@ -24,8 +24,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '26.12.1'
-      - name: Install locked pnpm
-        run: npm install --global pnpm@12.16.1 --ignore-scripts --no-audit --no-fund
+      - name: Install pinned pnpm for this job
+        run: |
+          pnpm_prefix=$(mktemp -d "$RUNNER_TEMP/workspace-tools-pnpm.XXXXXX")
+          npm install --global --prefix "$pnpm_prefix" pnpm@12.16.1 --ignore-scripts --no-audit --no-fund
+          printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Check TypeScript types
