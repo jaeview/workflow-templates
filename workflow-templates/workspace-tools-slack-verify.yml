@@ -56,10 +56,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version || '26.12.1' }}
-      - name: Install locked pnpm and dependencies
+      - name: Install pinned pnpm for this job
         run: |
-          npm install --global pnpm@12.16.1 --ignore-scripts --no-audit --no-fund
-          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm_prefix=$(mktemp -d "$RUNNER_TEMP/workspace-tools-pnpm.XXXXXX")
+          npm install --global --prefix "$pnpm_prefix" pnpm@12.16.1 --ignore-scripts --no-audit --no-fund
+          printf '%s\n' "$pnpm_prefix/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run read-only Slack configuration and channel check
         env:
           CHECK_MODE: ${{ inputs.mode || 'check' }}
