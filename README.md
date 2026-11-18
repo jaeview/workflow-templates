@@ -33,6 +33,7 @@ Mac Studio Apple Silicon (`[self-hosted, macOS, ARM64]`) 자체 호스팅 러너
 | Reusable Workflow (`.github/workflows/`) | Drop-in Template (`workflow-templates/`) | 설명 |
 | --- | --- | --- |
 | `jaeview-web-selfhost-checks.yml` | `selfhost-migration-checks.yml` | 변경 범위 판정(`scope.mjs`), 병렬 코드/포맷 검사, CI 발행본 복원, Next 운영 빌드·Playwright 브라우저 테스트, API/서버 단위 테스트, `fresh-schema.sh`, 전체 스택 리허설, 운영 웹·프록시 컨테이너 검증 |
+| | `pr-full-check.yml` | `full-check` 라벨을 붙이면 PR의 전체 검증을 실행합니다. 다른 라벨은 러너를 사용하지 않습니다. |
 | `jaeview-web-operations-checks.yml` | `operations-checks.yml` | `deploy/operations` 타입·단위 테스트(Docker 슬롯에서 실행하는 격리 Postgres 17 컨테이너), `run-host.sh` 문법 검사, `data-analysis` MCP 스크립트 테스트 |
 | `jaeview-web-develop-release.yml` | `develop-release.yml` | `develop` 브랜치 전체 검증 후 Apple Silicon 네이티브 `linux/arm64` 이미지 4종 빌드, 격리 smoke 3종 + Python 자동 배포 테스트(macOS venv `cryptography`), GHCR 비공개 푸시 |
 | `jaeview-web-develop-apply.yml` | `develop-apply.yml` | GitHub OIDC 단기 토큰으로 `https://dev.jaeview.com/_deploy/v1` 컨트롤러에 배포 요청 및 영수증 아티팩트 보관 |
@@ -105,3 +106,4 @@ jobs:
 ### 방법 2: Drop-in Standalone 템플릿 복사 (`workflow-templates/`)
 - 대상 저장소용 YAML을 골라 해당 저장소의 `.github/workflows/`에 복사합니다. `jaeview-web`에서 `develop-release.yml`을 사용할 때는 같은 디렉터리에 `selfhost-migration-checks.yml`도 둡니다.
 - `selfhost-migration-checks.yml`은 `main`, `develop`, `refactor/directory-structure`를 대상으로 하는 PR에서 실행됩니다. 푸시 트리거는 `main`과 `refactor/directory-structure`에 적용되며, `develop` 푸시에서는 `develop-release.yml`이 이 워크플로를 호출합니다.
+- PR에서 `full-check` 라벨을 붙이는 즉시 전체 검증을 실행하려면 `pr-full-check.yml`을 함께 복사합니다. CI를 중앙 Reusable Workflow로 호출하는 저장소에서는 `pr-full-check.yml`의 `uses`를 해당 Reusable Workflow 경로와 ref로 바꿉니다. 일반 PR 호출 워크플로의 `pull_request.types`는 `opened`, `synchronize`, `reopened`로 설정합니다.

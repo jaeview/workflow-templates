@@ -1,0 +1,12 @@
+{
+  "name": "jaeview-web PR Full Check Label",
+  "description": "Run jaeview-web full CI when a PR receives the full-check label. Install alongside the self-hosted migration checks workflow.",
+  "iconName": "jaeview-icon",
+  "categories": [
+    "Continuous integration"
+  ],
+  "filePatterns": [
+    "package.json",
+    "pnpm-workspace.yaml"
+  ]
+}

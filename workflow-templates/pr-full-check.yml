@@ -1,0 +1,13 @@
+name: PR full-check label
+on:
+  pull_request:
+    types: [labeled]
+    branches: [main, develop, refactor/directory-structure]
+    paths-ignore: ['docs/**', '**/*.md']
+permissions:
+  contents: read
+  packages: read
+jobs:
+  full-check:
+    if: github.repository == 'jaeview/jaeview-web' && github.event.label.name == 'full-check'
+    uses: ./.github/workflows/selfhost-migration-checks.yml
